@@ -93,9 +93,11 @@ import java.awt.Rectangle
 //  1. USER CONFIG
 // ============================================================================
 
-def INPUT_DIR   = "/path/to/confocal_input"     // folder of .czi/.lif/.nd2/...
-def OUTPUT_DIR  = "/path/to/analysis_output"    // results are written here
-def PANEL       = "A"                            // "A" | "B" | "C" | "S2"
+// PILOT SETTINGS -- pointed at the OME sample file, not study data.
+// Restore your own paths and PANEL="A" before a real run.
+def INPUT_DIR   = "C:/Users/dream/OneDrive/문서/GitHub/Claude_Fiji_ImageJ_Cell_Counting/ref_images"
+def OUTPUT_DIR  = "C:/Users/dream/OneDrive/문서/GitHub/Claude_Fiji_ImageJ_Cell_Counting/pilot_output"
+def PANEL       = "T"                            // "A" | "B" | "C" | "S2" | "T"(pilot)
 def FILE_GLOB   = ~/(?i).*\.(czi|lif|nd2|oib|oif|ics|tif|tiff)$/
 
 // If present, a samplesheet.csv in INPUT_DIR overrides per-file metadata.
@@ -103,7 +105,10 @@ def FILE_GLOB   = ~/(?i).*\.(czi|lif|nd2|oib|oif|ics|tif|tiff)$/
 def USE_SAMPLESHEET = true
 
 // --- Segmentation ---
-def SEGMENTER   = "stardist"    // "stardist" (preferred) | "classic"
+// PILOT: forced to "classic". StarDist/CSBDeep are not installed in this Fiji,
+// and TensorFlow has no windows-arm64 native build, so "stardist" cannot run on
+// this machine. Set back to "stardist" on an x86_64 Fiji with the update sites on.
+def SEGMENTER   = "classic"     // "stardist" (preferred) | "classic"
 def STARDIST_PROB = 0.50
 def STARDIST_NMS  = 0.40
 def STARDIST_TILES = 1          // raise (e.g. 4/9) for large images / low RAM
@@ -179,6 +184,22 @@ def PANELS = [
                [idx:2, marker:"KRT5", role:"cyto",       areaMarker:true],
                [idx:3, marker:"Sox2", role:"nuc_marker"] ],
     classify:[ ["Sox2":true], ["KRT5":true,"Sox2":true], ["KRT5":true,"Sox2":false] ] ],
+
+  // ---------------------------------------------------------------------
+  // PILOT / PLUMBING TEST ONLY -- NOT a study panel. Delete when done.
+  // Maps the OME sample file ND2/karl/sample_image.nd2 (Nikon CSU, 20x,
+  // 5 channels: 1=far-red 2=red 3=green 4=blue/DAPI 5=brightfield) onto the
+  // panel-A *shape* (nuclear + cyto/areaMarker + membrane).
+  // The DAPI-equivalent counterstain is channel 4, NOT channel 1 -- this is
+  // the only panel here whose nuclear idx is not 1.
+  // The marker names below are structural placeholders: the green/red
+  // channels are smFISH RNA probes from a skin sample, so KRT5/AGER
+  // positivity numbers this produces are MEANINGLESS. See ref_images/README.md.
+  "T": [ label:"T_PILOT_ome_nd2",
+    channels:[ [idx:4, marker:"DAPI", role:"nuclear"],
+               [idx:3, marker:"KRT5", role:"cyto",     areaMarker:true],
+               [idx:2, marker:"AGER", role:"membrane"] ],
+    classify:[ ["KRT5":true,"AGER":false], ["KRT5":true,"AGER":true] ] ],
 
   // FUTURE: 4 channels exceeds the 3-marker slide limit; use single plane for YAP
   // (set PROJECTION="single") so the nuclear:cytoplasmic ratio is not MIP-corrupted.
@@ -729,7 +750,8 @@ files.each { f ->
       manifest.images << [ file: f.name, panel: panelKey, tissue_source: res.tissue_source, n_cells: res.cells ]
     }
   } catch (Throwable t) {
-    IJ.log("  ERROR on " + f.name + ": " + t.getMessage())
+    IJ.log("  ERROR on " + f.name + ": " + t)
+    def sw = new java.io.StringWriter(); t.printStackTrace(new java.io.PrintWriter(sw)); IJ.log(sw.toString())
     manifest.images << [ file: f.name, panel: panelKey, error: t.getMessage() ]
   }
 }

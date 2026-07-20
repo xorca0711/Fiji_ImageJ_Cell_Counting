@@ -1,3 +1,23 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Reference microscopy images: large binaries, never commit.
+# Provenance is tracked in ref_images/README.md instead.
+*.czi
+*.nd2
+*.lif
+*.vsi
+*.ets
+*.ome.tif
+*.ome.tiff
+ref_images/*.zip
+ref_images/*.tif
+ref_images/*.tiff
+ref_images/*.jpg
+
+# Pipeline outputs
+analysis_output/
+pilot_output/
+ref_images/
+*_TEST.groovy
