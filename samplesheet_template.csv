@@ -1,0 +1,23 @@
+filename,mouse_id,section_id,genotype,condition,panel
+# Place this file (renamed to samplesheet.csv) in INPUT_DIR to override per-file metadata.
+# One row per image file. Lines beginning with '#' are ignored.
+#   filename   : exact image file name as it appears in INPUT_DIR (e.g. m01_PR8_A_s1.czi)
+#   mouse_id   : biological replicate id  <-- STATS n IS COUNTED BY THIS, not by section
+#   section_id : technical section id within a mouse (s1, s2, ...)
+#   genotype   : WT | Het | KO      (IFN-gamma allele status)
+#   condition  : PR8 | naive        (infection state; add timepoint if needed e.g. PR8_d21)
+#   panel      : A | B | C | D | P | S | S2   (see README panel legend)
+m01_PR8_A_s1.czi,m01,s1,KO,PR8,A
+m01_PR8_A_s2.czi,m01,s2,KO,PR8,A
+m01_PR8_A_s3.czi,m01,s3,KO,PR8,A
+m01_PR8_B_s1.czi,m01,s1,KO,PR8,B
+m01_PR8_B_s2.czi,m01,s2,KO,PR8,B
+m01_PR8_C_s1.czi,m01,s1,KO,PR8,C
+m02_PR8_A_s1.czi,m02,s1,Het,PR8,A
+m02_PR8_A_s2.czi,m02,s2,Het,PR8,A
+m02_PR8_A_s3.czi,m02,s3,Het,PR8,A
+m02_PR8_B_s1.czi,m02,s1,Het,PR8,B
+m02_PR8_B_s2.czi,m02,s2,Het,PR8,B
+m02_PR8_C_s1.czi,m02,s1,Het,PR8,C
+m03_naive_A_s1.czi,m03,s1,WT,naive,A
+m03_naive_B_s1.czi,m03,s1,WT,naive,B

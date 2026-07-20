@@ -4,11 +4,17 @@
  *  Confocal immunofluorescence quantification for the IFN-gamma KO / PR8
  *  influenza injury project (KRT5 pod remodeling readout).
  * ----------------------------------------------------------------------------
- *  Panels (max 3 markers/slide = DAPI + 2 primaries):
- *     A : DAPI | KRT5 | AGER      -> hero pod + AT1 boundary  (KRT5+/AGER-)
- *     B : DAPI | KRT5 | Pro-SPC   -> regeneration readout (AT2)
- *     C : DAPI | KRT5 | CD8       -> immune infiltrate density
- *     S2: DAPI | KRT5 | p63 | YAP -> FUTURE (mechanistic; see notes below)
+ *  Antibody set: KRT5, Pro-SPC, AGER, PDPN, CD4, CD8, Sox2  (+ p63, YAP, Aqp5)
+ *
+ *  Panels (max 3 markers/slide = DAPI + 2 primaries). PANEL keys are single
+ *  tokens so they survive filename parsing; pick per slide via samplesheet:
+ *     A : DAPI | KRT5 | AGER      -> pod + AT1 boundary   (KRT5+/AGER-)   [Scheme1 x3]
+ *     B : DAPI | KRT5 | Pro-SPC   -> regeneration readout (AT2)          [Scheme1 x2]
+ *     C : DAPI | KRT5 | CD8       -> cytotoxic T infiltrate              [Scheme1 x1]
+ *     D : DAPI | KRT5 | CD4       -> helper T infiltrate
+ *     P : DAPI | KRT5 | PDPN      -> AT1 alt (T1-alpha)    (KRT5+/PDPN-)
+ *     S : DAPI | KRT5 | Sox2      -> airway/epithelial (optional)
+ *     S2: DAPI | KRT5 | p63 | YAP -> FUTURE Scheme 2 (mechanistic; see notes)
  *
  *  Feature coverage:
  *   [x] Bio-Formats import (metadata + calibration preserved)
@@ -58,6 +64,7 @@
 
 import ij.IJ
 import ij.ImagePlus
+import ij.Prefs
 import ij.gui.Roi
 import ij.gui.Overlay
 import ij.gui.PolygonRoi
@@ -69,6 +76,7 @@ import ij.process.ImageProcessor
 import ij.process.ImageStatistics
 import ij.process.AutoThresholder
 import ij.process.ColorProcessor
+import ij.process.ShortProcessor
 import ij.plugin.ZProjector
 import ij.plugin.ChannelSplitter
 import ij.plugin.RoiEnlarger
@@ -114,8 +122,9 @@ def POD_THRESH_METHOD   = "Otsu" // Otsu|Triangle|Li|Huang|MaxEntropy...
 // --- Positivity ---
 // Object is positive if its mean (raw) >= channelOtsu(inTissue) * sensitivity.
 // Tune per marker: >1 = stricter, <1 = more permissive.
-def POS_SENSITIVITY = [ "KRT5":1.00, "AGER":1.00, "ProSPC":1.00,
-                        "CD8":1.00, "CD4":1.00, "p63":1.00, "YAP":1.00 ]
+def POS_SENSITIVITY = [ "KRT5":1.00, "AGER":1.00, "PDPN":1.00, "ProSPC":1.00,
+                        "CD8":1.00, "CD4":1.00, "Sox2":1.00, "Aqp5":1.00,
+                        "p63":1.00, "YAP":1.00 ]
 
 // --- Tissue auto-detection (used only if no manual ROI is supplied) ---
 def TISSUE_BLUR_SIGMA_PX = 4.0
@@ -149,9 +158,30 @@ def PANELS = [
     channels:[ [idx:1, marker:"DAPI", role:"nuclear"],
                [idx:2, marker:"KRT5", role:"cyto",     areaMarker:true],
                [idx:3, marker:"CD8",  role:"cyto"] ],
-    classify:[ ["CD8":true] ] ],
+    classify:[ ["CD8":true], ["KRT5":true,"CD8":true] ] ],
 
-  // FUTURE: 4 channels exceeds the 3-marker slide limit; use single plane for YAP.
+  "D": [ label:"D_KRT5_CD4",
+    channels:[ [idx:1, marker:"DAPI", role:"nuclear"],
+               [idx:2, marker:"KRT5", role:"cyto",     areaMarker:true],
+               [idx:3, marker:"CD4",  role:"cyto"] ],
+    classify:[ ["CD4":true], ["KRT5":true,"CD4":true] ] ],
+
+  // AT1 alternative via podoplanin (T1-alpha). Enables the KRT5+/PDPN- readout.
+  "P": [ label:"P_KRT5_PDPN",
+    channels:[ [idx:1, marker:"DAPI", role:"nuclear"],
+               [idx:2, marker:"KRT5", role:"cyto",     areaMarker:true],
+               [idx:3, marker:"PDPN", role:"membrane"] ],
+    classify:[ ["KRT5":true,"PDPN":false], ["KRT5":true,"PDPN":true] ] ],
+
+  // Optional airway/epithelial marker.
+  "S": [ label:"S_KRT5_Sox2",
+    channels:[ [idx:1, marker:"DAPI", role:"nuclear"],
+               [idx:2, marker:"KRT5", role:"cyto",       areaMarker:true],
+               [idx:3, marker:"Sox2", role:"nuc_marker"] ],
+    classify:[ ["Sox2":true], ["KRT5":true,"Sox2":true], ["KRT5":true,"Sox2":false] ] ],
+
+  // FUTURE: 4 channels exceeds the 3-marker slide limit; use single plane for YAP
+  // (set PROJECTION="single") so the nuclear:cytoplasmic ratio is not MIP-corrupted.
   "S2": [ label:"S2_KRT5_p63_YAP",
     channels:[ [idx:1, marker:"DAPI", role:"nuclear"],
                [idx:2, marker:"KRT5", role:"cyto",       areaMarker:true],
@@ -270,13 +300,28 @@ def positiveAreaInRoi(ImagePlus maskImp, Roi roi) {
 }
 
 // Build a binary mask ImagePlus (255 = signal) from a channel by threshold.
+// The numeric lower threshold is stashed as a property for provenance export.
+// Requires Prefs.blackBackground=true (set in main) so foreground = 255.
 def buildThresholdMask(ImagePlus ch, double blurSigma, String method) {
   ImagePlus dup = ch.duplicate()
   if (blurSigma > 0) new GaussianBlur().blurGaussian(dup.getProcessor(), blurSigma)
   IJ.setAutoThreshold(dup, method + " dark")
+  double thr = dup.getProcessor().getMinThreshold()   // raw intensity, -1 if unset
   IJ.run(dup, "Convert to Mask", "")
   dup.setCalibration(ch.getCalibration())
+  dup.setProperty("thresholdValue", thr)
   return dup
+}
+
+// Perinuclear cytoplasm only = enlarged cell ROI minus the nucleus ROI.
+// Used for a true nuclear:cytoplasmic ratio (e.g. YAP). null if degenerate.
+def ringOnly(Roi nuc, Roi cell) {
+  try {
+    ShapeRoi s = new ShapeRoi(cell).not(new ShapeRoi(nuc))
+    Rectangle b = s.getBounds()
+    if (b == null || b.width <= 0 || b.height <= 0) return null
+    return s
+  } catch (Throwable e) { return null }
 }
 
 // Tissue ROI: manual if RoiSet/.roi present, else auto from DAPI.
@@ -420,10 +465,12 @@ def processImage(String imgPath, panelKey, panelDef, meta, cfg, outDir) {
              "size=" + cfg.podMinArea + "-Infinity add")
       def podRois = rmp.getRoisAsArray()
       def podAreas = podRois.collect { measureRoi(mask, it).area }
+      def podThr = mask.getProperty("thresholdValue")
       podStats[c.marker] = [ area_um2: podArea,
                              frac_of_region: (regionAreaUm2 > 0 ? podArea/regionAreaUm2 : 0),
                              n_pods: podRois.length,
-                             mean_pod_area_um2: (podAreas.isEmpty()? 0 : podAreas.sum()/podAreas.size()) ]
+                             mean_pod_area_um2: (podAreas.isEmpty()? 0 : podAreas.sum()/podAreas.size()),
+                             threshold: (podThr != null ? podThr : -1) ]
       maskReg.close()
     }
 
@@ -451,12 +498,13 @@ def processImage(String imgPath, panelKey, panelDef, meta, cfg, outDir) {
           val = measureRoi(img, nuc).mean
         } else if (c.role == "nuc_ratio") {
           nucVal = measureRoi(img, nuc).mean
-          // ring = cell minus nucleus (approx via enlarged - nucleus areas)
-          ringVal = measureRoi(img, cellRoi).mean
+          // true cytoplasmic ring = (enlarged cell) MINUS (nucleus)
+          def ring = ringOnly(nuc, cellRoi)
+          double cytoVal = (ring != null) ? measureRoi(img, ring).mean : measureRoi(img, cellRoi).mean
           val = nucVal   // positivity uses nuclear signal for YAP
           row[m + "_nuc_mean"] = nucVal
-          row[m + "_cell_mean"] = ringVal
-          row[m + "_nuc_cell_ratio"] = (ringVal > 0 ? nucVal/ringVal : 0)
+          row[m + "_cyto_mean"] = cytoVal
+          row[m + "_nuc_cyto_ratio"] = (cytoVal > 0 ? nucVal/cytoVal : 0)
         } else { // cyto / membrane
           val = measureRoi(img, cellRoi).mean
         }
@@ -492,12 +540,14 @@ def processImage(String imgPath, panelKey, panelDef, meta, cfg, outDir) {
     panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
       srow[c.marker + "_pos_count"] = posCount[c.marker]
       srow[c.marker + "_density_per_mm2"] = (regionAreaUm2 > 0 ? posCount[c.marker] / (regionAreaUm2/1e6) : 0)
+      srow[c.marker + "_pos_threshold"] = chThresh[c.marker]   // resolved raw-intensity cutoff
     }
     podStats.each { m, ps ->
       srow[m + "_pod_area_um2"] = ps.area_um2
       srow[m + "_pod_area_frac"] = ps.frac_of_region
       srow[m + "_n_pods"] = ps.n_pods
       srow[m + "_mean_pod_area_um2"] = ps.mean_pod_area_um2
+      srow[m + "_pod_threshold"] = ps.threshold
     }
     classCount.each { k, v -> srow["class_" + k + "_count"] = v }
     summaryRows << srow
@@ -521,7 +571,7 @@ def processImage(String imgPath, panelKey, panelDef, meta, cfg, outDir) {
     segmenter: cfg.segmenter, stardist_prob: cfg.prob, stardist_nms: cfg.nms, stardist_tiles: cfg.tiles,
     ring_expand_um: cfg.ringExpandUm, min_nucleus_area_um2: cfg.minNucArea,
     pod_min_area_um2: cfg.podMinArea, pod_blur_sigma_px: cfg.podBlur, pod_thresh_method: cfg.podMethod,
-    pos_sensitivity: cfg.sensitivity,
+    pos_sensitivity: cfg.sensitivity, black_background: cfg.blackBackground,
     tissue_roi_source: tissue.source, tissue_thresh_method: cfg.tissueMethod,
     channel_map: panelDef.channels
   ]
@@ -563,9 +613,10 @@ def buildQcOverlay(markerImg, panelDef, Roi region, nucRois, krt5PosRois, podMas
 }
 
 def saveLabelMask(ImagePlus ref, nucRois, String path) {
-  def ip = ref.getProcessor().createProcessor(ref.getWidth(), ref.getHeight())
+  // 16-bit labels so >255 nuclei per region do not collide.
+  def ip = new ShortProcessor(ref.getWidth(), ref.getHeight())
   nucRois.eachWithIndex { r, i ->
-    ip.setColor(i + 1); ip.fill(r)
+    ip.setValue(i + 1); ip.fill(r)
   }
   def lab = new ImagePlus("labels", ip); lab.setCalibration(ref.getCalibration())
   IJ.saveAs(lab, "Tiff", path); lab.close()
@@ -614,12 +665,14 @@ def loadSamplesheet(String dir) {
   def idx = { name -> header.indexOf(name) }
   def map = [:]
   lines.drop(1).each { ln ->
-    if (ln.trim().isEmpty()) return
+    if (ln.trim().isEmpty() || ln.trim().startsWith("#")) return   // skip blanks + comments
     def p = ln.split(",")
     def get = { n -> def i = idx(n); (i >= 0 && i < p.length) ? p[i].trim() : "NA" }
-    map[get("filename")] = [ mouse_id: get("mouse_id"), section_id: get("section_id"),
-                             genotype: get("genotype"), condition: get("condition"),
-                             panel: get("panel") ]
+    def fn = get("filename")
+    if (fn == null || fn.isEmpty() || fn == "NA") return
+    map[fn] = [ mouse_id: get("mouse_id"), section_id: get("section_id"),
+                genotype: get("genotype"), condition: get("condition"),
+                panel: get("panel") ]
   }
   return map
 }
@@ -628,8 +681,14 @@ def loadSamplesheet(String dir) {
 //  8. MAIN
 // ============================================================================
 
+// Force a consistent binary convention: thresholded objects become 255 on a 0
+// background. Without this, "Convert to Mask" can invert per the user's Fiji
+// prefs and silently corrupt every area/count. Recorded in provenance below.
+Prefs.blackBackground = true
+
 ensureDir(OUTPUT_DIR)
 def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles: STARDIST_TILES,
+           blackBackground: true,
            projection: PROJECTION, singlePlane: SINGLE_PLANE,
            ringExpandUm: RING_EXPAND_UM, minNucArea: MIN_NUCLEUS_AREA_UM2,
            podMinArea: POD_MIN_AREA_UM2, podBlur: POD_BLUR_SIGMA_PX, podMethod: POD_THRESH_METHOD,
@@ -639,12 +698,21 @@ def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles:
 def versions = captureVersions()
 IJ.log("ImageJ " + versions.imagej_version + " | Bio-Formats " + versions.bioformats_version)
 
+def inDir = new File(INPUT_DIR)
+if (!inDir.isDirectory()) {
+  IJ.error("INPUT_DIR is not a folder:\n" + INPUT_DIR +
+           "\nEdit INPUT_DIR / OUTPUT_DIR at the top of the script.")
+  return
+}
+
 def sheet = USE_SAMPLESHEET ? loadSamplesheet(INPUT_DIR) : null
 
-def files = new File(INPUT_DIR).listFiles()
+def listed = inDir.listFiles()
+def files = (listed == null ? [] : listed.toList())
              .findAll { it.isFile() && (it.name =~ FILE_GLOB) }
              .sort { it.name }
 IJ.log("Found " + files.size() + " image(s).")
+if (files.isEmpty()) IJ.log("  (nothing matched FILE_GLOB in INPUT_DIR)")
 
 def masterSummary = []
 def manifest = [ run_timestamp: versions.timestamp, versions: versions, config: cfg,
