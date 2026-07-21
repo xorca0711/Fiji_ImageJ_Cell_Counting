@@ -121,11 +121,49 @@ Every requested feature maps to the pipeline:
    python3 aggregate_to_mouse.py /path/to/analysis_output/run_summary.csv
    ```
 
+For a headless run, use `SEGMENTER = "classic"`. On installations where the
+Fiji launcher itself does not start (observed with one Windows ARM64 bundle),
+invoke Fiji's bundled Java directly from PowerShell:
+
+```powershell
+$fiji = "X:\Fiji"
+$java = Get-ChildItem "$fiji\java" -Recurse -Filter java.exe | Select-Object -First 1
+& $java.FullName `
+  '--add-opens=java.base/java.lang=ALL-UNNAMED' `
+  "-javaagent:$fiji\jars\ij1-patcher-2.0.0.jar=init" `
+  '-Djava.awt.headless=true' "-Dplugins.dir=$fiji" `
+  -cp "$fiji\jars\*;$fiji\plugins\*" net.imagej.Main --headless `
+  --run 'C:\path\to\IF_Quant_Pipeline.groovy'
+```
+
+The script exits automatically after all headless exports complete. StarDist's
+ROI Manager output remains interactive-only; use the classic segmenter for
+unattended jobs.
+
+Paths and test selection can be supplied without editing the Groovy file:
+
+```powershell
+$env:IFQ_INPUT_DIR = 'G:\내 드라이브\260719-CW'
+$env:IFQ_OUTPUT_DIR = "$PWD\test_runs\260719-CW_CC10_smoke"
+$env:IFQ_PANEL = 'E'                 # E=CC10/tdTOM/AcTub; R=T1A/tdTOM/mRAGE
+$env:IFQ_RECURSIVE = 'true'
+$env:IFQ_INCLUDE_REGEX = '.*CC10_488.*20x 2k_Cycle.*G001_0001\.oir$'
+$env:IFQ_MAX_IMAGES = '1'            # 0 means all matching files
+```
+
+The 260719-CW filename convention is recognized automatically: mouse/date,
+condition, section, and panel E/R are inferred. A `samplesheet.csv` remains
+authoritative when supplied. Recursive runs add a stable suffix for duplicate
+basenames so `Cycle` and `Cycle_01` data cannot overwrite each other.
+Output folders and files use the concise pattern
+`<mouse>_<condition>_<panel>_<section>`; the complete acquisition filename is
+retained in `run_manifest.json` and each `__params.json` file.
+
 ---
 
 ## 6. Input data expectations
 
-- **Formats:** anything Bio-Formats reads (`.czi`, `.lif`, `.nd2`, `.oib`,
+- **Formats:** anything Bio-Formats reads (`.czi`, `.lif`, `.nd2`, `.oir`, `.oib`,
   `.oif`, `.ics`, `.tif/.tiff`). Adjust `FILE_GLOB` to widen/narrow.
 - **Calibration:** must be embedded in the file (µm/pixel, Z-step). The pipeline
   reads and preserves it; all areas/distances are reported in µm/µm².
@@ -233,7 +271,9 @@ sections as repeated measures).
   `PROJECTION="single"` and use one representative plane.
 - **Auto thresholds are placeholders.** They adapt per image but you must
   confirm positivity against QC overlays and freeze sensitivities before
-  reporting.
+  reporting. The automatic cutoff comes from tissue pixels but is applied to
+  per-object ring/nuclear means; those distributions differ, so a sensitivity
+  of `1.00` is not inherently a biologically neutral cutoff.
 - **Ligand vs. receptor KO** and **viral load** — see §1.
 
 ---

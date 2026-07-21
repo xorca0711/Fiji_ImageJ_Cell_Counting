@@ -81,24 +81,35 @@ import ij.plugin.ZProjector
 import ij.plugin.ChannelSplitter
 import ij.plugin.RoiEnlarger
 import ij.plugin.filter.GaussianBlur
-import ij.plugin.frame.RoiManager
+import ij.plugin.filter.ParticleAnalyzer
+import ij.plugin.filter.ThresholdToSelection
+import ij.io.RoiDecoder
 import loci.plugins.BF
 import loci.plugins.in.ImporterOptions
 import loci.formats.FormatTools
 import groovy.json.JsonOutput
 import java.awt.Color
 import java.awt.Rectangle
+import java.util.zip.ZipInputStream
 
 // ============================================================================
 //  1. USER CONFIG
 // ============================================================================
 
-// PILOT SETTINGS -- pointed at the OME sample file, not study data.
-// Restore your own paths and PANEL="A" before a real run.
-def INPUT_DIR   = "C:/Users/dream/OneDrive/문서/GitHub/Claude_Fiji_ImageJ_Cell_Counting/ref_images"
-def OUTPUT_DIR  = "C:/Users/dream/OneDrive/문서/GitHub/Claude_Fiji_ImageJ_Cell_Counting/pilot_output"
-def PANEL       = "T"                            // "A" | "B" | "C" | "S2" | "T"(pilot)
-def FILE_GLOB   = ~/(?i).*\.(czi|lif|nd2|oib|oif|ics|tif|tiff)$/
+// Environment variables let unattended/test runs override these defaults
+// without rewriting the analysis script (see README). Forward slashes are
+// accepted by Java on Windows and avoid escaping drive paths.
+def envOr = { String name, String fallback ->
+  def value = System.getenv(name)
+  return (value == null || value.trim().isEmpty()) ? fallback : value.trim()
+}
+def INPUT_DIR   = envOr("IFQ_INPUT_DIR", new File("ref_images").getAbsolutePath())
+def OUTPUT_DIR  = envOr("IFQ_OUTPUT_DIR", new File("pilot_output").getAbsolutePath())
+def PANEL       = envOr("IFQ_PANEL", "T")
+def FILE_GLOB   = ~/(?i).*\.(czi|lif|nd2|oir|oib|oif|ics|tif|tiff)$/
+def RECURSIVE   = envOr("IFQ_RECURSIVE", "false").toBoolean()
+def INCLUDE_REGEX = envOr("IFQ_INCLUDE_REGEX", ".*")
+def MAX_IMAGES  = Integer.parseInt(envOr("IFQ_MAX_IMAGES", "0")) // 0 = all
 
 // If present, a samplesheet.csv in INPUT_DIR overrides per-file metadata.
 // Columns: filename,mouse_id,section_id,genotype,condition,panel
@@ -129,7 +140,8 @@ def POD_THRESH_METHOD   = "Otsu" // Otsu|Triangle|Li|Huang|MaxEntropy...
 // Tune per marker: >1 = stricter, <1 = more permissive.
 def POS_SENSITIVITY = [ "KRT5":1.00, "AGER":1.00, "PDPN":1.00, "ProSPC":1.00,
                         "CD8":1.00, "CD4":1.00, "Sox2":1.00, "Aqp5":1.00,
-                        "p63":1.00, "YAP":1.00 ]
+                        "p63":1.00, "YAP":1.00, "CC10":1.00, "tdTOM":1.00,
+                        "AcTub":1.00, "T1A":1.00, "mRAGE":1.00 ]
 
 // --- Tissue auto-detection (used only if no manual ROI is supplied) ---
 def TISSUE_BLUR_SIGMA_PX = 4.0
@@ -185,6 +197,24 @@ def PANELS = [
                [idx:3, marker:"Sox2", role:"nuc_marker"] ],
     classify:[ ["Sox2":true], ["KRT5":true,"Sox2":true], ["KRT5":true,"Sox2":false] ] ],
 
+  // 260719-CW Olympus OIR panels. Bio-Formats metadata confirms channel order
+  // by emission bands: 470 (DAPI), 540 (488), 620 (tdTOM), 750 nm (647).
+  "E": [ label:"E_CC10_tdTOM_AcTub",
+    channels:[ [idx:1, marker:"DAPI",  role:"nuclear"],
+               [idx:2, marker:"CC10",  role:"cyto"],
+               [idx:3, marker:"tdTOM", role:"cyto", areaMarker:true],
+               [idx:4, marker:"AcTub", role:"cyto"] ],
+    classify:[ ["tdTOM":true], ["CC10":true,"tdTOM":true],
+               ["AcTub":true,"tdTOM":true] ] ],
+
+  "R": [ label:"R_T1A_tdTOM_mRAGE",
+    channels:[ [idx:1, marker:"DAPI",  role:"nuclear"],
+               [idx:2, marker:"T1A",   role:"membrane"],
+               [idx:3, marker:"tdTOM", role:"cyto", areaMarker:true],
+               [idx:4, marker:"mRAGE", role:"membrane"] ],
+    classify:[ ["tdTOM":true], ["T1A":true,"tdTOM":true],
+               ["mRAGE":true,"tdTOM":true] ] ],
+
   // ---------------------------------------------------------------------
   // PILOT / PLUMBING TEST ONLY -- NOT a study panel. Delete when done.
   // Maps the OME sample file ND2/karl/sample_image.nd2 (Nikon CSU, 20x,
@@ -234,11 +264,94 @@ def captureVersions() {
 
 def ensureDir(String p) { def d = new File(p); if (!d.exists()) d.mkdirs(); return d }
 
-def getRoiManager() {
-  def rm = RoiManager.getInstance()
-  if (rm == null) rm = new RoiManager()
-  rm.reset()
-  return rm
+// Headless-safe replacement for Analyze Particles + ROI Manager. When an ROI
+// is present, clear pixels outside it first: ParticleAnalyzer only honors the
+// ROI bounds reliably and can otherwise count particles from excluded parts of
+// a non-rectangular/composite ROI.
+def particlesToRois(ImagePlus imp, double minAreaCal, boolean excludeEdges) {
+  ImagePlus work = imp
+  Roi restriction = imp.getRoi()
+  if (restriction != null) {
+    // ImagePlus.duplicate() may crop to the active ROI. Duplicate the processor
+    // directly so the restriction remains in the original image coordinates.
+    work = new ImagePlus(imp.getTitle() + "_roi_restricted",
+                         imp.getProcessor().duplicate())
+    work.setCalibration(imp.getCalibration())
+    ImageProcessor wp = work.getProcessor()
+    Rectangle rb = restriction.getBounds()
+    ImageProcessor rm = restriction.getMask()
+    int rx = (int)rb.x, ry = (int)rb.y
+    int rw = (int)rb.width, rh = (int)rb.height
+    // Clear outside explicitly. ImageProcessor.fillOutside(ShapeRoi) changes
+    // processor ROI/mask state and is unreliable with these composite ROIs.
+    for (int y = 0; y < wp.getHeight(); y++) {
+      for (int x = 0; x < wp.getWidth(); x++) {
+        boolean inBounds = x >= rx && x < rx + rw && y >= ry && y < ry + rh
+        if (!inBounds || (rm != null && rm.get(x - rx, y - ry) == 0)) wp.set(x, y, 0)
+      }
+    }
+  }
+
+  int opts = ParticleAnalyzer.SHOW_ROI_MASKS
+  if (excludeEdges) opts |= ParticleAnalyzer.EXCLUDE_EDGE_PARTICLES
+  def rt = new ResultsTable()
+  def pa = new ParticleAnalyzer(opts, Measurements.AREA, rt,
+                                minAreaCal, Double.MAX_VALUE)
+  pa.setHideOutputImage(true)
+  ImageProcessor src = work.getProcessor()
+  // Every caller supplies a 0/255 binary mask. Ignore any threshold state left
+  // behind by Convert to Mask/Watershed and always select non-zero foreground.
+  src.setThreshold(128, 255, ImageProcessor.NO_LUT_UPDATE)
+  if (!pa.analyze(work)) {
+    if (!work.is(imp)) work.close()
+    return []
+  }
+  ImagePlus labels = pa.getOutputImage()
+  if (!work.is(imp)) work.close()
+  if (labels == null) return []
+
+  ImageProcessor lp = labels.getProcessor()
+  def out = []
+  for (int i = 1; i <= rt.size(); i++) {
+    lp.setThreshold((double)i, (double)i, ImageProcessor.NO_LUT_UPDATE)
+    def r = ThresholdToSelection.run(new ImagePlus("particle_labels", lp))
+    if (r != null) out << r
+  }
+  lp.resetThreshold()
+  labels.close()
+  return out
+}
+
+// Headless-safe replacement for RoiManager.runCommand("Open", ...).
+def readRoiFile(File f) {
+  def rois = []
+  if (f.getName().toLowerCase().endsWith(".roi")) {
+    def r = new RoiDecoder(f.getAbsolutePath()).getRoi()
+    if (r != null) {
+      if (r.getName() == null) r.setName(f.getName() - ".roi")
+      rois << r
+    }
+    return rois
+  }
+  def zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(f)))
+  try {
+    def entry
+    while ((entry = zis.getNextEntry()) != null) {
+      if (!entry.getName().toLowerCase().endsWith(".roi")) continue
+      def baos = new ByteArrayOutputStream()
+      byte[] buf = new byte[8192]
+      int len
+      while ((len = zis.read(buf)) > 0) baos.write(buf, 0, len)
+      def r = new RoiDecoder(baos.toByteArray(), entry.getName()).getRoi()
+      if (r != null) {
+        r.setName(entry.getName() - ".roi")
+        rois << r
+      }
+    }
+  } finally {
+    zis.close()
+  }
+  return rois
 }
 
 // Import via Bio-Formats keeping metadata + calibration; grayscale, no split yet.
@@ -274,9 +387,11 @@ def projectChannel(ImagePlus ch, String projection, int singlePlane) {
 def eachRoiPixel(Roi roi, Closure body) {
   Rectangle b = roi.getBounds()
   ImageProcessor mask = roi.getMask()
-  for (int y = 0; y < b.height; y++) {
-    for (int x = 0; x < b.width; x++) {
-      if (mask == null || mask.get(x, y) != 0) body(b.x + x, b.y + y)
+  int bx = (int)b.x, by = (int)b.y
+  int bw = (int)b.width, bh = (int)b.height
+  for (int y = 0; y < bh; y++) {
+    for (int x = 0; x < bw; x++) {
+      if (mask == null || mask.get(x, y) != 0) body((int)(bx + x), (int)(by + y))
     }
   }
 }
@@ -314,10 +429,20 @@ def measureRoi(ImagePlus imp, Roi roi) {
 def positiveAreaInRoi(ImagePlus maskImp, Roi roi) {
   ImageProcessor mp = maskImp.getProcessor()
   Calibration cal = maskImp.getCalibration()
-  double pxArea = cal.pixelWidth * cal.pixelHeight
-  long pos = 0
-  eachRoiPixel(roi) { x, y -> if (mp.get(x, y) > 0) pos++ }
-  return pos * pxArea
+  Rectangle b = roi.getBounds()
+  ImageProcessor roiMask = roi.getMask()
+  int bx = (int)b.x, by = (int)b.y
+  int x0 = Math.max(0, bx), y0 = Math.max(0, by)
+  int x1 = Math.min(mp.getWidth(), bx + (int)b.width)
+  int y1 = Math.min(mp.getHeight(), by + (int)b.height)
+  long pos = 0L
+  for (int y = y0; y < y1; y++) {
+    for (int x = x0; x < x1; x++) {
+      if ((roiMask == null || roiMask.get(x - bx, y - by) != 0) &&
+          mp.get(x, y) != 0) pos++
+    }
+  }
+  return pos * cal.pixelWidth * cal.pixelHeight
 }
 
 // Build a binary mask ImagePlus (255 = signal) from a channel by threshold.
@@ -356,9 +481,7 @@ def resolveTissueRois(String imgPath, ImagePlus dapi, cfg) {
                      new File(parent, "RoiSet.zip") ]
   def hit = candidates.find { it.exists() }
   if (hit != null) {
-    def rm = getRoiManager()
-    rm.runCommand("Open", hit.getAbsolutePath())
-    def rois = rm.getRoisAsArray()
+    def rois = readRoiFile(hit)
     def named = []
     rois.eachWithIndex { r, i -> named << [name: (r.getName() ?: ("region" + (i+1))), roi: r] }
     return [source: hit.name, regions: named]
@@ -366,11 +489,9 @@ def resolveTissueRois(String imgPath, ImagePlus dapi, cfg) {
   // Auto tissue from DAPI
   def mask = buildThresholdMask(dapi, cfg.tissueBlur, cfg.tissueMethod)
   IJ.run(mask, "Options...", "iterations=2 count=1 do=Close")
-  def rm = getRoiManager()
-  IJ.run(mask, "Analyze Particles...",
-         "size=" + cfg.tissueMinArea + "-Infinity add")
-  def rois = rm.getRoisAsArray()
-  if (rois.length == 0) {  // fall back to whole field
+  def rois = particlesToRois(mask, cfg.tissueMinArea, false)
+  mask.close()
+  if (rois.isEmpty()) {  // fall back to whole field
     return [source: "whole_field", regions: [[name: "tissue", roi: new Roi(0, 0, dapi.getWidth(), dapi.getHeight())]]]
   }
   // merge all particles into one "tissue" region
@@ -381,10 +502,13 @@ def resolveTissueRois(String imgPath, ImagePlus dapi, cfg) {
 
 // Nucleus ROIs within a given tissue region.
 def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
-  def rm = getRoiManager()
   ImagePlus crop = dapi.duplicate()
   crop.setRoi(region)
   if (cfg.segmenter == "stardist") {
+    // StarDist's ROI Manager output is interactive-only. Keep it isolated from
+    // the classic path so classic segmentation remains fully headless-safe.
+    def rm = ij.plugin.frame.RoiManager.getInstance() ?: new ij.plugin.frame.RoiManager()
+    rm.reset()
     crop.setTitle("DAPI_seg")
     crop.show()   // StarDist is happiest with a shown image (interactive mode)
     IJ.run(crop, "Command From Macro",
@@ -408,9 +532,10 @@ def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
     IJ.run(m, "Watershed", "")
     m.setCalibration(dapi.getCalibration())
     m.setRoi(region)
-    IJ.run(m, "Analyze Particles...",
-           "size=" + cfg.minNucArea + "-Infinity exclude add")
-    return rm.getRoisAsArray().collect { it }
+    def rois = particlesToRois(m, cfg.minNucArea, true)
+    m.close()
+    crop.close()
+    return rois
   }
 }
 
@@ -418,10 +543,10 @@ def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
 //  5. PER-IMAGE PROCESSING
 // ============================================================================
 
-def processImage(String imgPath, panelKey, panelDef, meta, cfg, outDir) {
+def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg, outDir) {
   IJ.log("---- " + new File(imgPath).name + "  [panel " + panelKey + "] ----")
-  def stem = new File(imgPath).name.replaceFirst(/\.[^.]+$/, "")
-  def imgOut = ensureDir(outDir + "/" + stem)
+  def sourceStem = new File(imgPath).name.replaceFirst(/\.[^.]+$/, "")
+  def imgOut = ensureDir(outDir + "/" + outputKey)
 
   def raw = bfOpen(imgPath)
   Calibration cal = raw.getCalibration()
@@ -480,16 +605,13 @@ def processImage(String imgPath, panelKey, panelDef, meta, cfg, outDir) {
       def mask = areaMasks[c.marker]
       double podArea = positiveAreaInRoi(mask, region)
       // discrete pods: particle analysis of the mask restricted to region
-      def rmp = getRoiManager()
       def maskReg = mask.duplicate(); maskReg.setCalibration(cal); maskReg.setRoi(region)
-      IJ.run(maskReg, "Analyze Particles...",
-             "size=" + cfg.podMinArea + "-Infinity add")
-      def podRois = rmp.getRoisAsArray()
+      def podRois = particlesToRois(maskReg, cfg.podMinArea, false)
       def podAreas = podRois.collect { measureRoi(mask, it).area }
       def podThr = mask.getProperty("thresholdValue")
       podStats[c.marker] = [ area_um2: podArea,
                              frac_of_region: (regionAreaUm2 > 0 ? podArea/regionAreaUm2 : 0),
-                             n_pods: podRois.length,
+                             n_pods: podRois.size(),
                              mean_pod_area_um2: (podAreas.isEmpty()? 0 : podAreas.sum()/podAreas.size()),
                              threshold: (podThr != null ? podThr : -1) ]
       maskReg.close()
@@ -504,7 +626,7 @@ def processImage(String imgPath, panelKey, panelDef, meta, cfg, outDir) {
     nuclei.eachWithIndex { nuc, ni ->
       allNucRois << nuc
       def cellRoi = RoiEnlarger.enlarge(nuc, (int)Math.round(cfg.ringExpandUm / cal.pixelWidth))
-      def row = [ image: stem, panel: panelKey, region: regName, cell_id: (ni + 1) ]
+      def row = [ image: sourceStem, panel: panelKey, region: regName, cell_id: (ni + 1) ]
       row.mouse_id = meta.mouse_id; row.section_id = meta.section_id
       row.genotype = meta.genotype; row.condition = meta.condition
       def cs = measureRoi(dapi, nuc)
@@ -526,8 +648,9 @@ def processImage(String imgPath, panelKey, panelDef, meta, cfg, outDir) {
           row[m + "_nuc_mean"] = nucVal
           row[m + "_cyto_mean"] = cytoVal
           row[m + "_nuc_cyto_ratio"] = (cytoVal > 0 ? nucVal/cytoVal : 0)
-        } else { // cyto / membrane
-          val = measureRoi(img, cellRoi).mean
+        } else { // cyto / membrane: measure the perinuclear ring, not nucleus + ring
+          def ring = ringOnly(nuc, cellRoi)
+          val = (ring != null) ? measureRoi(img, ring).mean : measureRoi(img, cellRoi).mean
         }
         row[m + "_mean"] = val
         boolean pos = val >= chThresh[m]
@@ -549,11 +672,11 @@ def processImage(String imgPath, panelKey, panelDef, meta, cfg, outDir) {
     // ---- QC overlay for this region ----
     def qc = buildQcOverlay(markerImg, panelDef, region, allNucRois, krt5PosRois,
                             (areaMasks.isEmpty()? null : areaMasks[areaMasks.keySet().iterator().next()]))
-    def qcPath = imgOut.getAbsolutePath() + "/" + stem + "__" + regName + "__QC.png"
+    def qcPath = imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__QC.png"
     IJ.saveAs(qc, "PNG", qcPath); qc.close()
 
     // ---- region summary row ----
-    def srow = [ image: stem, panel: panelKey, region: regName,
+    def srow = [ image: sourceStem, panel: panelKey, region: regName,
                  mouse_id: meta.mouse_id, section_id: meta.section_id,
                  genotype: meta.genotype, condition: meta.condition,
                  region_area_um2: regionAreaUm2,
@@ -574,17 +697,18 @@ def processImage(String imgPath, panelKey, panelDef, meta, cfg, outDir) {
     summaryRows << srow
 
     // save nuclei mask for the region
-    saveLabelMask(dapi, allNucRois, imgOut.getAbsolutePath() + "/" + stem + "__" + regName + "__nuclei_mask.tif")
+    saveLabelMask(dapi, allNucRois, imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__nuclei_mask.tif")
   }
 
   // save pod masks
   areaMasks.each { m, mask ->
-    IJ.saveAs(mask, "Tiff", imgOut.getAbsolutePath() + "/" + stem + "__" + m + "_pod_mask.tif")
+    IJ.saveAs(mask, "Tiff", imgOut.getAbsolutePath() + "/" + outputKey + "__" + m + "_pod_mask.tif")
   }
 
   // per-image params/provenance
   def params = [
-    image: new File(imgPath).name, panel: panelKey, panel_label: panelDef.label,
+    image: new File(imgPath).name, output_key: outputKey,
+    panel: panelKey, panel_label: panelDef.label,
     calibration: [ pixel_width_um: cal.pixelWidth, pixel_height_um: cal.pixelHeight,
                    pixel_depth_um: cal.pixelDepth, unit: cal.getUnit(),
                    n_slices: raw.getNSlices(), n_channels: channels.length ],
@@ -596,10 +720,10 @@ def processImage(String imgPath, panelKey, panelDef, meta, cfg, outDir) {
     tissue_roi_source: tissue.source, tissue_thresh_method: cfg.tissueMethod,
     channel_map: panelDef.channels
   ]
-  new File(imgOut, stem + "__params.json").text = JsonOutput.prettyPrint(JsonOutput.toJson(params))
+  new File(imgOut, outputKey + "__params.json").text = JsonOutput.prettyPrint(JsonOutput.toJson(params))
 
   // write per-image cell CSV
-  writeCsv(cellRows, imgOut.getAbsolutePath() + "/" + stem + "__cells.csv")
+  writeCsv(cellRows, imgOut.getAbsolutePath() + "/" + outputKey + "__cells.csv")
 
   // cleanup
   markerImg.each { k, v -> v.close() }
@@ -624,13 +748,19 @@ def buildQcOverlay(markerImg, panelDef, Roi region, nucRois, krt5PosRois, podMas
   krt5PosRois.each { r -> def rr = (Roi) r.clone(); rr.setStrokeColor(Color.MAGENTA); ov.add(rr) }       // KRT5+ cells
   if (podMask != null) {                                                                                 // yellow pod outline
     def pm = podMask.duplicate(); pm.setRoi(region)
-    def rmp = getRoiManager()
-    IJ.run(pm, "Analyze Particles...", "size=0-Infinity add")
-    rmp.getRoisAsArray().each { r -> def rr = (Roi) r.clone(); rr.setStrokeColor(Color.YELLOW); ov.add(rr) }
+    particlesToRois(pm, 0.0d, false).each { r ->
+      def rr = (Roi) r.clone(); rr.setStrokeColor(Color.YELLOW); ov.add(rr)
+    }
     pm.close()
   }
-  rgb.setOverlay(ov)
-  return rgb.flatten()
+  // ImagePlus.flatten() constructs an ImageCanvas and fails in headless mode.
+  ImageProcessor cp = rgb.getProcessor()
+  ov.toArray().each { r ->
+    cp.setColor(r.getStrokeColor() ?: Color.WHITE)
+    r.drawPixels(cp)
+  }
+  rgb.setProcessor(cp)
+  return rgb
 }
 
 def saveLabelMask(ImagePlus ref, nucRois, String path) {
@@ -669,6 +799,17 @@ def parseMeta(String fname, sheet, defaultPanel) {
   if (sheet != null && sheet.containsKey(fname)) return sheet[fname]
   // fallback: try token convention mouseID_condition_panel_section.ext
   def stem = fname.replaceFirst(/\.[^.]+$/, "")
+  // 260719-CW convention, e.g. "... 260105 M5 pr8_bleo ...
+  // CC10_488 ..._A01_G001_0001.oir". Infer the two staining panels so a
+  // recursive mixed-panel run does not need 151 samplesheet rows.
+  def cw = (stem =~ /(?i).*?\b(\d{6})\s+([MF]\d+)\s+(pr8_(?:bleo|PBS))\b.*?_(A\d+_G\d+_\d+)$/)
+  if (cw.matches()) {
+    def inferredPanel = stem.toLowerCase().contains("cc10_488") ? "E" :
+                        (stem.toLowerCase().contains("t1a_488") ? "R" : defaultPanel)
+    return [ mouse_id: cw.group(1) + "_" + cw.group(2),
+             section_id: cw.group(4), genotype: "krt5-creERT2;tdTOM",
+             condition: cw.group(3).toLowerCase(), panel: inferredPanel ]
+  }
   def toks = stem.split("_")
   return [ mouse_id: (toks.length > 0 ? toks[0] : "NA"),
            condition: (toks.length > 1 ? toks[1] : "NA"),
@@ -728,26 +869,46 @@ if (!inDir.isDirectory()) {
 
 def sheet = USE_SAMPLESHEET ? loadSamplesheet(INPUT_DIR) : null
 
-def listed = inDir.listFiles()
-def files = (listed == null ? [] : listed.toList())
-             .findAll { it.isFile() && (it.name =~ FILE_GLOB) }
-             .sort { it.name }
+def listed = []
+if (RECURSIVE) inDir.eachFileRecurse { f -> if (f.isFile()) listed << f }
+else listed = (inDir.listFiles() ?: [] as File[]).toList()
+def includePattern = ~/(?i)${INCLUDE_REGEX}/
+def files = listed.findAll { it.isFile() && (it.name ==~ FILE_GLOB) && (it.getAbsolutePath() ==~ includePattern) }
+                  .sort { it.getAbsolutePath() }
+if (MAX_IMAGES > 0) files = files.take(MAX_IMAGES)
 IJ.log("Found " + files.size() + " image(s).")
 if (files.isEmpty()) IJ.log("  (nothing matched FILE_GLOB in INPUT_DIR)")
 
 def masterSummary = []
 def manifest = [ run_timestamp: versions.timestamp, versions: versions, config: cfg,
-                 input_dir: INPUT_DIR, output_dir: OUTPUT_DIR, images: [] ]
+                 input_dir: INPUT_DIR, output_dir: OUTPUT_DIR, recursive: RECURSIVE,
+                 include_regex: INCLUDE_REGEX, max_images: MAX_IMAGES, images: [] ]
+
+// Duplicate basenames occur in folders such as Cycle and Cycle_01. Give only
+// duplicates a stable parent-path suffix so a recursive run cannot overwrite
+// an earlier image's output directory.
+def basenameCounts = files.countBy { it.name }
 
 files.each { f ->
   def m = parseMeta(f.name, sheet, PANEL)
   def panelKey = (m.panel && PANELS.containsKey(m.panel)) ? m.panel : PANEL
   def panelDef = PANELS[panelKey]
+  // Keep Windows paths manageable. The source acquisition name is preserved
+  // in params/manifest; output paths use concise, analysis-relevant metadata.
+  def safeToken = { value ->
+    def s = (value == null || value.toString().trim().isEmpty()) ? "NA" : value.toString().trim()
+    return s.replaceAll(/[^A-Za-z0-9._-]+/, "-").replaceAll(/^-+|-+$/, "")
+  }
+  def baseStem = [m.mouse_id, m.condition, panelKey, m.section_id].collect { safeToken(it) }.join("_")
+  def outputKey = (basenameCounts[f.name] > 1) ?
+                  baseStem + "__" + Integer.toHexString(f.parentFile.absolutePath.hashCode()) : baseStem
   try {
-    def res = processImage(f.getAbsolutePath(), panelKey, panelDef, m, cfg, OUTPUT_DIR)
+    def res = processImage(f.getAbsolutePath(), outputKey, panelKey, panelDef, m, cfg, OUTPUT_DIR)
     if (res != null) {
       masterSummary.addAll(res.summary)
-      manifest.images << [ file: f.name, panel: panelKey, tissue_source: res.tissue_source, n_cells: res.cells ]
+      manifest.images << [ file: f.name, relative_path: inDir.toPath().relativize(f.toPath()).toString(),
+                           output_key: outputKey, panel: panelKey,
+                           tissue_source: res.tissue_source, n_cells: res.cells ]
     }
   } catch (Throwable t) {
     IJ.log("  ERROR on " + f.name + ": " + t)
@@ -762,3 +923,7 @@ new File(OUTPUT_DIR, "run_manifest.json").text = JsonOutput.prettyPrint(JsonOutp
 
 IJ.log("DONE. Wrote run_summary.csv and run_manifest.json to " + OUTPUT_DIR)
 IJ.log("Reminder: aggregate run_summary.csv to MOUSE level before stats (n = mice, not sections).")
+
+// ImageJ starts non-daemon UI/event threads even with --headless. Exit after
+// synchronous exports so command-line and cluster jobs do not hang at DONE.
+if (java.awt.GraphicsEnvironment.isHeadless()) System.exit(0)
