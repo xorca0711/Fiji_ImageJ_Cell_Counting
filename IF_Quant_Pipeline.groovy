@@ -123,6 +123,11 @@ def MIN_RING_POS_FRACTION = [
   "T1A": Double.parseDouble(envOr("IFQ_T1A_MIN_RING_FRACTION", "0.30")),
   "mRAGE": Double.parseDouble(envOr("IFQ_MRAGE_MIN_RING_FRACTION", "0.30"))
 ]
+def DAPI_METHOD = envOr("IFQ_DAPI_METHOD", "local_phansalkar").toLowerCase() // local_phansalkar | global_otsu
+def DAPI_BACKGROUND_RADIUS_UM = Double.parseDouble(envOr("IFQ_DAPI_BACKGROUND_RADIUS_UM", "15.0"))
+def DAPI_LOCAL_RADIUS_UM = Double.parseDouble(envOr("IFQ_DAPI_LOCAL_RADIUS_UM", "4.0"))
+def DAPI_BLUR_SIGMA_PX = Double.parseDouble(envOr("IFQ_DAPI_BLUR_SIGMA_PX", "1.0"))
+def DAPI_CONTRAST_SATURATION = Double.parseDouble(envOr("IFQ_DAPI_CONTRAST_SATURATION", "0.35"))
 
 // If present, a samplesheet.csv in INPUT_DIR overrides per-file metadata.
 // Columns: filename,mouse_id,section_id,genotype,condition,panel
@@ -143,7 +148,7 @@ def SINGLE_PLANE = -1           // used only when PROJECTION="single"; -1 = midd
 
 // --- Geometry (calibrated, micrometres) ---
 def RING_EXPAND_UM      = 2.0   // perinuclear ring width -> "cell" proxy
-def MIN_NUCLEUS_AREA_UM2 = 15.0 // classic segmenter min object size
+def MIN_NUCLEUS_AREA_UM2 = Double.parseDouble(envOr("IFQ_MIN_NUCLEUS_AREA_UM2", "8.0"))
 def POD_MIN_AREA_UM2    = 50.0  // a "pod" particle must exceed this
 def POD_BLUR_SIGMA_PX   = 2.0
 def POD_THRESH_METHOD   = "Otsu" // Otsu|Triangle|Li|Huang|MaxEntropy...
@@ -315,8 +320,14 @@ def particlesToRois(ImagePlus imp, double minAreaCal, boolean excludeEdges) {
   int opts = ParticleAnalyzer.SHOW_ROI_MASKS
   if (excludeEdges) opts |= ParticleAnalyzer.EXCLUDE_EDGE_PARTICLES
   def rt = new ResultsTable()
+  // ParticleAnalyzer's Java constructor expects pixel counts (the interactive
+  // dialog performs this conversion before constructing it). Convert the
+  // public calibrated µm² setting explicitly.
+  def workCal = work.getCalibration()
+  double pixelArea = workCal.pixelWidth * workCal.pixelHeight
+  double minAreaPixels = pixelArea > 0 ? minAreaCal / pixelArea : minAreaCal
   def pa = new ParticleAnalyzer(opts, Measurements.AREA, rt,
-                                minAreaCal, Double.MAX_VALUE)
+                                minAreaPixels, Double.MAX_VALUE)
   pa.setHideOutputImage(true)
   ImageProcessor src = work.getProcessor()
   // Every caller supplies a 0/255 binary mask. Ignore any threshold state left
@@ -574,11 +585,25 @@ def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
     def included = rois.findAll { region.contains((int)it.getBounds().getCenterX(), (int)it.getBounds().getCenterY()) }
     return [included: included, rejected: []]
   } else {
-    // classic watershed fallback
+    // Classic/local-threshold watershed fallback. The local mode is intended
+    // for uneven DAPI illumination and is fully recorded in params.json.
     def m = crop.duplicate()
-    new GaussianBlur().blurGaussian(m.getProcessor(), 2.0)
-    IJ.setAutoThreshold(m, "Otsu dark")
-    IJ.run(m, "Convert to Mask", "")
+    if (cfg.dapiMethod == "local_phansalkar") {
+      double px = Math.max(dapi.getCalibration().pixelWidth, 1.0e-9d)
+      int backgroundRadiusPx = Math.max(3, (int)Math.round(cfg.dapiBackgroundRadiusUm / px))
+      int localRadiusPx = Math.max(3, (int)Math.round(cfg.dapiLocalRadiusUm / px))
+      IJ.run(m, "Subtract Background...", "rolling=" + backgroundRadiusPx + " sliding")
+      if (cfg.dapiBlurSigmaPx > 0) new GaussianBlur().blurGaussian(m.getProcessor(), cfg.dapiBlurSigmaPx)
+      IJ.run(m, "Enhance Contrast...", "saturated=" + cfg.dapiContrastSaturation + " normalize")
+      if (m.getBitDepth() != 8) IJ.run(m, "8-bit", "")
+      IJ.run(m, "Auto Local Threshold",
+             "method=Phansalkar radius=" + localRadiusPx + " parameter_1=0 parameter_2=0 white")
+    } else {
+      new GaussianBlur().blurGaussian(m.getProcessor(), 2.0)
+      IJ.setAutoThreshold(m, "Otsu dark")
+      IJ.run(m, "Convert to Mask", "")
+    }
+    IJ.run(m, "Fill Holes", "")
     IJ.run(m, "Watershed", "")
     m.setCalibration(dapi.getCalibration())
     m.setRoi(region)
@@ -602,9 +627,10 @@ def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
               reason: (edge ? "image_edge" : (area < cfg.minNucArea ? "area_below_minimum" : "particle_filter")),
               area_um2: area]
     }
+    def candidateMask = m.duplicate(); candidateMask.setCalibration(dapi.getCalibration())
     m.close()
     crop.close()
-    return [included: rois, rejected: rejected]
+    return [included: rois, rejected: rejected, candidateMask: candidateMask]
   }
 }
 
@@ -783,12 +809,21 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     def qc = buildQcOverlay(markerImg, panelDef, region, allNucRois, qcMasks)
     def qcPath = imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__QC.png"
     IJ.saveAs(qc, "PNG", qcPath); qc.close()
+    def dapiQc = buildDapiQc(dapi, region, allNucRois, rejectedNuclei, cfg)
+    IJ.saveAs(dapiQc, "PNG", imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__DAPI_QC.png")
+    dapiQc.close()
+    if (segmentation.candidateMask != null) {
+      IJ.saveAs(segmentation.candidateMask, "Tiff",
+                imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__DAPI_candidate_mask.tif")
+      segmentation.candidateMask.close()
+    }
 
     // ---- region summary row ----
     def srow = [ image: sourceStem, panel: panelKey, region: regName,
                  mouse_id: meta.mouse_id, section_id: meta.section_id,
                  genotype: meta.genotype, condition: meta.condition, compartment: compartment,
                  region_area_um2: regionAreaUm2,
+                 dapi_segmentation_method: cfg.dapiMethod,
                  n_nuclei: nuclei.size(),
                  n_rejected_nucleus_candidates: rejectedNuclei.size(),
                  n_rejected_below_min_area: rejectedNuclei.count { it.reason == "area_below_minimum" },
@@ -833,6 +868,11 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                    n_slices: raw.getNSlices(), n_channels: channels.length ],
     projection: cfg.projection, single_plane: cfg.singlePlane,
     segmenter: cfg.segmenter, stardist_prob: cfg.prob, stardist_nms: cfg.nms, stardist_tiles: cfg.tiles,
+    dapi_preprocessing: [ method: cfg.dapiMethod,
+                          background_radius_um: cfg.dapiBackgroundRadiusUm,
+                          local_radius_um: cfg.dapiLocalRadiusUm,
+                          blur_sigma_px: cfg.dapiBlurSigmaPx,
+                          contrast_saturation_percent: cfg.dapiContrastSaturation ],
     ring_expand_um: cfg.ringExpandUm, min_nucleus_area_um2: cfg.minNucArea,
     pod_min_area_um2: cfg.podMinArea, pod_blur_sigma_px: cfg.podBlur, pod_thresh_method: cfg.podMethod,
     pos_sensitivity: cfg.sensitivity, black_background: cfg.blackBackground,
@@ -934,6 +974,27 @@ def buildQcOverlay(markerImg, panelDef, Roi region, nucRois, channelMasks) {
   return rgb
 }
 
+// DAPI-only audit view. Contrast balancing affects this PNG only; segmentation
+// uses the separately recorded preprocessing path and candidate mask.
+def buildDapiQc(ImagePlus dapi, Roi region, nucRois, rejectedNuclei, cfg) {
+  def display = dapi.duplicate()
+  IJ.run(display, "Enhance Contrast...", "saturated=" + cfg.dapiContrastSaturation + " normalize")
+  if (display.getBitDepth() != 8) IJ.run(display, "8-bit", "")
+  def rgb = new ImagePlus("DAPI_segmentation_QC", display.getProcessor().convertToRGB())
+  display.close()
+  ImageProcessor cp = rgb.getProcessor()
+  cp.setLineWidth(2); cp.setColor(new Color(255, 150, 0)); region.drawPixels(cp)
+  cp.setLineWidth(2); cp.setColor(new Color(210, 0, 255))
+  rejectedNuclei.each { it.roi.drawPixels(cp) }
+  cp.setLineWidth(2); cp.setColor(new Color(0, 220, 255))
+  nucRois.each { it.drawPixels(cp) }
+  cp.setColor(Color.BLACK); cp.setRoi(0, 0, Math.min(cp.getWidth(), 1050), 58); cp.fill()
+  cp.resetRoi(); cp.setFont(new Font("SansSerif", Font.BOLD, 16)); cp.setColor(Color.WHITE)
+  cp.drawString("DAPI ONLY (display-balanced): counted cyan | rejected candidate violet | ROI orange", 10, 23)
+  cp.drawString("Segmentation method: " + cfg.dapiMethod, 10, 47)
+  return rgb
+}
+
 def saveLabelMask(ImagePlus ref, nucRois, String path) {
   // 16-bit labels so >255 nuclei per region do not collide.
   def ip = new ShortProcessor(ref.getWidth(), ref.getHeight())
@@ -1024,6 +1085,9 @@ Prefs.blackBackground = true
 
 ensureDir(OUTPUT_DIR)
 def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles: STARDIST_TILES,
+           dapiMethod: DAPI_METHOD, dapiBackgroundRadiusUm: DAPI_BACKGROUND_RADIUS_UM,
+           dapiLocalRadiusUm: DAPI_LOCAL_RADIUS_UM, dapiBlurSigmaPx: DAPI_BLUR_SIGMA_PX,
+           dapiContrastSaturation: DAPI_CONTRAST_SATURATION,
            blackBackground: true,
            projection: PROJECTION, singlePlane: SINGLE_PLANE,
            ringExpandUm: RING_EXPAND_UM, minNucArea: MIN_NUCLEUS_AREA_UM2,

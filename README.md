@@ -155,6 +155,11 @@ $env:IFQ_T1A_THRESHOLD = '887.2'        # example only; freeze from controls
 $env:IFQ_MRAGE_THRESHOLD = '503.1'      # example only; freeze from controls
 $env:IFQ_T1A_MIN_RING_FRACTION = '0.30' # pilot value; validate before freezing
 $env:IFQ_MRAGE_MIN_RING_FRACTION = '0.30'
+$env:IFQ_DAPI_METHOD = 'local_phansalkar' # uneven-illumination alternative
+$env:IFQ_DAPI_BACKGROUND_RADIUS_UM = '15'
+$env:IFQ_DAPI_LOCAL_RADIUS_UM = '4'
+$env:IFQ_DAPI_BLUR_SIGMA_PX = '1'
+$env:IFQ_MIN_NUCLEUS_AREA_UM2 = '8' # pilot sensitivity; freeze after manual QC
 ```
 
 The 260719-CW filename convention is recognized automatically: mouse/date,
@@ -170,6 +175,13 @@ Cyan is the only per-object outline and marks counted DAPI nuclei. Orange marks
 the analysis ROI; green/red/white boundaries mark continuous fluorescence
 regions for T1A/tdTOM/mRAGE. Rejected DAPI candidates remain available in the
 separate `__rejected_nuclei_mask.tif` audit image.
+
+For DAPI tuning, the default `local_phansalkar` path adds rolling-background
+removal, gentle Gaussian smoothing, contrast normalization, local Phansalkar
+thresholding, hole filling, and watershed; `global_otsu` preserves the original
+fallback. Each run exports a display-balanced DAPI-only QC PNG and the actual
+binary `__DAPI_candidate_mask.tif`. Display color balance does not alter the
+mask; analytical preprocessing parameters are recorded in `__params.json`.
 
 For morphology-aware final calls, draw compartment ROIs before looking at the
 target-channel quantification and name each ROI `alveoli`, `airway`, or
