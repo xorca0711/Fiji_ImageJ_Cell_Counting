@@ -60,6 +60,15 @@ Marker roles the pipeline understands:
 - **nuc_marker** (p63, Sox2) — measured inside the nucleus.
 - **nuc_ratio** (YAP) — nucleus vs. a true cytoplasmic ring → nuclear:cytoplasmic
   ratio (needs a single Z-plane; see caveats).
+- **apical_cilia** (acetylated alpha-tubulin) — thresholded apical-cilia
+  patches plus an explicitly approximate nucleus-proximity association.
+
+For panel E, marker morphology determines the analytical unit. CC10/SCGB1A1 is
+measured in perinuclear cytoplasm as a secretory-cell phenotype, tdTomato is
+measured in perinuclear cytoplasm plus a reporter-positive area mask, and
+acetylated alpha-tubulin is measured as ciliary patches plus a 6-µm
+nucleus-adjacent support zone. At 20x the latter is an association with nearby
+cilia, not proof that an individual nucleus owns a resolved axoneme.
 
 To change which acquisition channel is which marker, edit the `idx:` values in
 the `PANELS` block at the top of the Groovy script.
@@ -160,6 +169,9 @@ $env:IFQ_DAPI_BACKGROUND_RADIUS_UM = '15'
 $env:IFQ_DAPI_LOCAL_RADIUS_UM = '4'
 $env:IFQ_DAPI_BLUR_SIGMA_PX = '1'
 $env:IFQ_MIN_NUCLEUS_AREA_UM2 = '8' # pilot sensitivity; freeze after manual QC
+$env:IFQ_ACTUB_SUPPORT_EXPAND_UM = '6'       # nucleus-to-apical-cilia support zone
+$env:IFQ_ACTUB_MIN_SUPPORT_FRACTION = '0.02' # exploratory; freeze from controls
+$env:IFQ_ACTUB_MIN_PATCH_AREA_UM2 = '0.5'    # 20x ciliary patch, not one axoneme
 ```
 
 The 260719-CW filename convention is recognized automatically: mouse/date,
@@ -222,12 +234,21 @@ groups are compared; the example values above are not validated cutoffs.
 | `POD_MIN_AREA_UM2` | minimum particle size to count as a KRT5⁺ pod |
 | `POD_THRESH_METHOD` | auto-threshold method for the pod mask (`Otsu`, `Li`, …) |
 | `POS_SENSITIVITY` | per-marker multiplier on the auto threshold (`>1` stricter, `<1` more permissive) |
+| `IFQ_ACTUB_SUPPORT_EXPAND_UM` | radius beyond each nucleus used for AcTub proximity association |
+| `IFQ_ACTUB_MIN_SUPPORT_FRACTION` | minimum fraction of that support zone above the AcTub threshold |
+| `IFQ_ACTUB_MIN_PATCH_AREA_UM2` | minimum connected AcTub ciliary-patch area at 20x |
 | `TISSUE_THRESH_METHOD` / `TISSUE_MIN_AREA_UM2` | auto tissue detection when no manual ROI |
 
 **Positivity rule:** an object is positive for a marker if its mean raw
 intensity ≥ (Otsu threshold computed **within that tissue region**) ×
 `POS_SENSITIVITY[marker]`. Thresholds adapt per image/region; the *resolved*
 numeric cutoff is exported so you can audit it.
+
+AcTub is the exception to the mean-intensity rule: its exploratory per-nucleus
+call requires a minimum fraction of the larger support zone to exceed the
+regional threshold. The primary AcTub outputs are regional ciliary area and
+connected ciliary patches. CC10 positivity denotes protein phenotype; after
+injury it must not be used alone to infer club-cell lineage.
 
 ---
 
@@ -244,7 +265,9 @@ OUTPUT_DIR/
     ├── <stem>__params.json             # per-image parameters, calibration, channel map, thresholds
     ├── <stem>__<region>__QC.png        # QC overlay: tissue (white), nuclei (cyan), KRT5⁺ (magenta), pods (yellow)
     ├── <stem>__<region>__nuclei_mask.tif  # 16-bit label mask of nuclei
-    └── <stem>__KRT5_pod_mask.tif       # binary pod mask (255 = KRT5⁺ pod)
+    ├── <stem>__KRT5_pod_mask.tif       # binary pod mask (255 = KRT5⁺ pod)
+    ├── <stem>__tdTOM_reporter_positive_mask.tif
+    └── <stem>__AcTub_ciliary_mask.tif  # thresholded ciliary patches
 ```
 
 `<stem>` is a concise channel signature so every exported file is
@@ -262,6 +285,9 @@ biological marker name is used.
 - `<marker>_pos_count`, `<marker>_density_per_mm2`, `<marker>_pos_threshold`.
 - `KRT5_pod_area_um2`, `KRT5_pod_area_frac`, `KRT5_n_pods`,
   `KRT5_mean_pod_area_um2`, `KRT5_pod_threshold` — **primary endpoint**.
+- `<marker>_positive_area_um2`, `<marker>_positive_area_frac`,
+  `<marker>_n_components`, `<marker>_area_mode` — morphology-neutral regional
+  fields; for panel E the modes are `reporter` (tdTomato) and `ciliary` (AcTub).
 - `class_<rule>_count` — double +/− populations (e.g. `class_KRT5+_AGER-_count`).
 
 After `aggregate_to_mouse.py` you also get:

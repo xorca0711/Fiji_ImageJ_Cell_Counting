@@ -75,6 +75,7 @@ import ij.measure.ResultsTable
 import ij.process.ImageProcessor
 import ij.process.ImageStatistics
 import ij.process.AutoThresholder
+import ij.process.ByteProcessor
 import ij.process.ColorProcessor
 import ij.process.ShortProcessor
 import ij.plugin.ZProjector
@@ -238,16 +239,17 @@ def PANELS = [
                [idx:2, marker:"CC10",  role:"cyto",    measurement:"perinuclear_secretory_cytoplasm", qcColor:"green", fileLabel:"CC10-488"],
                [idx:3, marker:"tdTOM", role:"cyto",    measurement:"perinuclear_lineage_reporter", qcColor:"red",
                 areaMarker:true, areaMode:"reporter", areaMinAreaUm2:8.0d],
-               [idx:4, marker:"AcTub", role:"apical_cilia", measurement:"apical_cilia_proximity", qcColor:"white", fileLabel:"AcTub-647",
+               [idx:4, marker:"AcTub", role:"apical_cilia", measurement:"apical_cilia_proximity", expectedCompartment:"airway", qcColor:"white", fileLabel:"AcTub-647",
                 areaMarker:true, areaMode:"ciliary", areaMinAreaUm2:ACTUB_MIN_PATCH_AREA_UM2, areaBlurSigmaPx:0.7d] ],
     classify:[ ["tdTOM":true], ["CC10":true,"tdTOM":true],
                ["AcTub":true,"tdTOM":true] ] ],
 
   "R": [ label:"R_T1A_tdTOM_mRAGE",
     channels:[ [idx:1, marker:"DAPI",  role:"nuclear",  qcColor:"blue"],
-               [idx:2, marker:"T1A",   role:"membrane", qcColor:"green", fileLabel:"T1alpha-488"],
-               [idx:3, marker:"tdTOM", role:"cyto",     qcColor:"red", areaMarker:true],
-               [idx:4, marker:"mRAGE", role:"membrane", qcColor:"white", fileLabel:"mRAGE-647"] ],
+               [idx:2, marker:"T1A",   role:"membrane", expectedCompartment:"alveolar", qcColor:"green", fileLabel:"T1alpha-488"],
+               [idx:3, marker:"tdTOM", role:"cyto", measurement:"perinuclear_lineage_reporter", qcColor:"red",
+                areaMarker:true, areaMode:"reporter", areaMinAreaUm2:8.0d],
+               [idx:4, marker:"mRAGE", role:"membrane", expectedCompartment:"alveolar", qcColor:"white", fileLabel:"mRAGE-647"] ],
     classify:[ ["tdTOM":true], ["T1A":true,"tdTOM":true],
                ["mRAGE":true,"tdTOM":true] ] ],
 
@@ -352,14 +354,52 @@ def particlesToRois(ImagePlus imp, double minAreaCal, boolean excludeEdges) {
   if (!work.is(imp)) work.close()
   if (labels == null) return []
 
+  // SHOW_ROI_MASKS assigns consecutive integer labels. The former conversion
+  // thresholded the complete 2048x2048 label image once per object, making ROI
+  // extraction O(objects * image pixels). Find all label bounds in one pass,
+  // then trace only each small cropped mask. This preserves the exact particle
+  // shapes and coordinates while reducing a multi-minute hotspot to seconds.
   ImageProcessor lp = labels.getProcessor()
-  def out = []
-  for (int i = 1; i <= rt.size(); i++) {
-    lp.setThreshold((double)i, (double)i, ImageProcessor.NO_LUT_UPDATE)
-    def r = ThresholdToSelection.run(new ImagePlus("particle_labels", lp))
-    if (r != null) out << r
+  int nLabels = rt.size()
+  int[] minX = new int[nLabels + 1]
+  int[] minY = new int[nLabels + 1]
+  int[] maxX = new int[nLabels + 1]
+  int[] maxY = new int[nLabels + 1]
+  java.util.Arrays.fill(minX, lp.getWidth())
+  java.util.Arrays.fill(minY, lp.getHeight())
+  java.util.Arrays.fill(maxX, -1)
+  java.util.Arrays.fill(maxY, -1)
+  for (int y = 0; y < lp.getHeight(); y++) {
+    for (int x = 0; x < lp.getWidth(); x++) {
+      int label = lp.get(x, y)
+      if (label < 1 || label > nLabels) continue
+      if (x < minX[label]) minX[label] = x
+      if (x > maxX[label]) maxX[label] = x
+      if (y < minY[label]) minY[label] = y
+      if (y > maxY[label]) maxY[label] = y
+    }
   }
-  lp.resetThreshold()
+  def out = []
+  for (int i = 1; i <= nLabels; i++) {
+    if (maxX[i] < minX[i] || maxY[i] < minY[i]) continue
+    int w = maxX[i] - minX[i] + 1
+    int h = maxY[i] - minY[i] + 1
+    def bp = new ByteProcessor(w, h)
+    for (int yy = 0; yy < h; yy++) {
+      for (int xx = 0; xx < w; xx++) {
+        if (lp.get(minX[i] + xx, minY[i] + yy) == i) bp.set(xx, yy, 255)
+      }
+    }
+    bp.setThreshold(128, 255, ImageProcessor.NO_LUT_UPDATE)
+    def particle = new ImagePlus("particle_label_" + i, bp)
+    def r = ThresholdToSelection.run(particle)
+    if (r != null) {
+      def rb = r.getBounds()
+      r.setLocation(minX[i] + rb.x, minY[i] + rb.y)
+      out << r
+    }
+    particle.close()
+  }
   labels.close()
   return out
 }
@@ -824,17 +864,19 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
         if (intensityPos) {
           posCount[m] = posCount[m] + 1
         }
-        if (m == "T1A" || m == "mRAGE") {
+        if (c.expectedCompartment != null) {
           double fraction = fractionAboveThreshold(img, spatialRoi, chThresh[m])
-          double requiredFraction = (double)(cfg.minRingPosFraction[m] ?: 0.30d)
+          double requiredFraction = c.role == "apical_cilia" ? cfg.actubMinSupportFraction :
+                                    (double)(cfg.minRingPosFraction[m] ?: 0.30d)
           boolean patternPos = fraction >= requiredFraction
-          def compartmentConsistent = compartment == "unassigned" ? "" :
-                                       (compartment == "alveolar" ? 1 : 0)
+          def compartmentConsistent = (compartment == "unassigned" || compartment == "ambiguous") ? "" :
+                                       (compartment == c.expectedCompartment ? 1 : 0)
           def truePos = compartmentConsistent == "" ? "" :
                         (intensityPos && patternPos && compartmentConsistent == 1 ? 1 : 0)
-          row[m + "_ring_fraction_above_threshold"] = fraction
-          row[m + "_minimum_ring_fraction"] = requiredFraction
+          row[m + (c.role == "apical_cilia" ? "_support_fraction_for_true_call" : "_ring_fraction_above_threshold")] = fraction
+          row[m + (c.role == "apical_cilia" ? "_minimum_support_fraction_for_true_call" : "_minimum_ring_fraction")] = requiredFraction
           row[m + "_pattern_pos"] = patternPos ? 1 : 0
+          row[m + "_expected_compartment"] = c.expectedCompartment
           row[m + "_compartment_consistent"] = compartmentConsistent
           row[m + "_true_pos"] = truePos
           if (truePos == 1) truePosCount[m] = truePosCount[m] + 1
@@ -879,8 +921,10 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       srow[c.marker + "_density_per_mm2"] = (regionAreaUm2 > 0 ? posCount[c.marker] / (regionAreaUm2/1e6) : 0)
       srow[c.marker + "_pos_threshold"] = chThresh[c.marker]   // resolved raw-intensity cutoff
       srow[c.marker + "_threshold_source"] = chThreshSource[c.marker]
-      if (c.marker == "T1A" || c.marker == "mRAGE") {
-        srow[c.marker + "_true_pos_count"] = compartment == "unassigned" ? "" : truePosCount[c.marker]
+      srow[c.marker + "_measurement_model"] = c.measurement ?: c.role
+      if (c.expectedCompartment != null) {
+        srow[c.marker + "_expected_compartment"] = c.expectedCompartment
+        srow[c.marker + "_true_pos_count"] = (compartment == "unassigned" || compartment == "ambiguous") ? "" : truePosCount[c.marker]
       }
     }
     areaStats.each { m, as ->
@@ -1031,8 +1075,8 @@ def buildQcOverlay(markerImg, panelDef, Roi region, nucRois, channelMasks) {
   nucRois.each { it.drawPixels(cp) }
 
   // Burn a compact legend into the exported PNG so colors remain auditable.
-  cp.setColor(Color.BLACK); cp.setRoi(0, 0, Math.min(cp.getWidth(), 1190), 64); cp.fill()
-  cp.resetRoi(); cp.setFont(new Font("SansSerif", Font.BOLD, 16)); cp.setColor(Color.WHITE)
+  cp.setMask(null); cp.setColor(Color.BLACK); cp.setRoi(0, 0, Math.min(cp.getWidth(), 1190), 64); cp.fill()
+  cp.resetRoi(); cp.setMask(null); cp.setFont(new Font("SansSerif", Font.BOLD, 16)); cp.setColor(Color.WHITE)
   def rawLegend = panelDef.channels.collect { c -> c.marker + " " + (c.qcColor ?: "gray") }.join(" | ")
   cp.drawString("RAW: " + rawLegend, 10, 22)
   cp.drawString("OUTLINES: counted DAPI nuclei cyan | ROI orange | thresholded marker regions", 10, 48)
@@ -1053,8 +1097,8 @@ def buildDapiQc(ImagePlus dapi, Roi region, nucRois, rejectedNuclei, cfg) {
   rejectedNuclei.each { it.roi.drawPixels(cp) }
   cp.setLineWidth(2); cp.setColor(new Color(0, 220, 255))
   nucRois.each { it.drawPixels(cp) }
-  cp.setColor(Color.BLACK); cp.setRoi(0, 0, Math.min(cp.getWidth(), 1050), 58); cp.fill()
-  cp.resetRoi(); cp.setFont(new Font("SansSerif", Font.BOLD, 16)); cp.setColor(Color.WHITE)
+  cp.setMask(null); cp.setColor(Color.BLACK); cp.setRoi(0, 0, Math.min(cp.getWidth(), 1050), 58); cp.fill()
+  cp.resetRoi(); cp.setMask(null); cp.setFont(new Font("SansSerif", Font.BOLD, 16)); cp.setColor(Color.WHITE)
   cp.drawString("DAPI ONLY (display-balanced): counted cyan | rejected candidate violet | ROI orange", 10, 23)
   cp.drawString("Segmentation method: " + cfg.dapiMethod, 10, 47)
   return rgb
