@@ -107,7 +107,7 @@ def envOr = { String name, String fallback ->
   return (value == null || value.trim().isEmpty()) ? fallback : value.trim()
 }
 def INPUT_DIR   = envOr("IFQ_INPUT_DIR", new File("ref_images").getAbsolutePath())
-def OUTPUT_DIR  = envOr("IFQ_OUTPUT_DIR", new File("pilot_output").getAbsolutePath())
+def OUTPUT_DIR  = envOr("IFQ_OUTPUT_DIR", new File("analysis_output").getAbsolutePath())
 def PANEL       = envOr("IFQ_PANEL", "T")
 def FILE_GLOB   = ~/(?i).*\.(czi|lif|nd2|oir|oib|oif|ics|tif|tiff)$/
 def RECURSIVE   = envOr("IFQ_RECURSIVE", "false").toBoolean()

@@ -22,3 +22,8 @@ pilot_output/
 test_runs/
 ref_images/
 *_TEST.groovy
+
+# Local legacy archives: indexed by legacy/README.md, binaries/results untracked.
+legacy/test_runs/
+legacy/pilot_output/
+legacy/ref_images_analysis_output/
