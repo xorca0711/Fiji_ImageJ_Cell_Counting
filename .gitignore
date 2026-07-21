@@ -19,5 +19,6 @@ ref_images/*.jpg
 # Pipeline outputs
 analysis_output/
 pilot_output/
+test_runs/
 ref_images/
 *_TEST.groovy

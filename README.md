@@ -55,11 +55,40 @@ survive filename parsing.
 Marker roles the pipeline understands:
 
 - **nuclear** (DAPI) — segmentation channel.
-- **cyto** (KRT5, Pro-SPC, CD4, CD8) — measured in a perinuclear ring.
-- **membrane** (AGER, PDPN) — measured in the ring; also interpretable as area.
+- **cyto** (KRT5, Pro-SPC, CC10, tdTomato) — measured in a perinuclear ring.
+- **membrane** (AGER, PDPN, T1A, mRAGE, CD4, CD8) — measured in a local
+  membrane-support ring.
 - **nuc_marker** (p63, Sox2) — measured inside the nucleus.
 - **nuc_ratio** (YAP) — nucleus vs. a true cytoplasmic ring → nuclear:cytoplasmic
   ratio (needs a single Z-plane; see caveats).
+- **apical_cilia** (acetylated alpha-tubulin) — thresholded apical-cilia
+  patches plus an explicitly approximate nucleus-proximity association.
+
+See [`MARKER_MORPHOLOGY_GUIDE.md`](MARKER_MORPHOLOGY_GUIDE.md) for the complete
+marker-by-marker measurement, compartment-gating, optical-sectioning, control,
+and QC rationale.
+
+### Morphology-first call authority
+
+The final marker call has three states: positive, negative, or indeterminate.
+An intensity cutoff first defines candidate positive pixels. A final positive
+then requires the marker-specific minimum spatial coverage, connected pattern,
+localization/enrichment rule, unique ownership where applicable, and anatomical
+compartment. A final negative is assigned only when the marker is evaluable.
+Missing compartment, invalid YAP projection, empty support, or shared support is
+indeterminate rather than negative.
+
+`<marker>_pos` is the legacy mean-intensity audit result. Classifications and
+counts use `<marker>_final_call`; they do not use the raw mean-intensity result.
+Adaptive Otsu calls are explicitly exploratory. Use fixed, control-derived
+`IFQ_<MARKER>_THRESHOLD` values for confirmatory analysis.
+
+For panel E, marker morphology determines the analytical unit. CC10/SCGB1A1 is
+measured in perinuclear cytoplasm as a secretory-cell phenotype, tdTomato is
+measured in perinuclear cytoplasm plus a reporter-positive area mask, and
+acetylated alpha-tubulin is measured as ciliary patches plus a 6-µm
+nucleus-adjacent support zone. At 20x the latter is an association with nearby
+cilia, not proof that an individual nucleus owns a resolved axoneme.
 
 To change which acquisition channel is which marker, edit the `idx:` values in
 the `PANELS` block at the top of the Groovy script.
@@ -121,11 +150,87 @@ Every requested feature maps to the pipeline:
    python3 aggregate_to_mouse.py /path/to/analysis_output/run_summary.csv
    ```
 
+For a headless run, use `SEGMENTER = "classic"`. On installations where the
+Fiji launcher itself does not start (observed with one Windows ARM64 bundle),
+invoke Fiji's bundled Java directly from PowerShell:
+
+```powershell
+$fiji = "X:\Fiji"
+$java = Get-ChildItem "$fiji\java" -Recurse -Filter java.exe | Select-Object -First 1
+& $java.FullName `
+  '--add-opens=java.base/java.lang=ALL-UNNAMED' `
+  "-javaagent:$fiji\jars\ij1-patcher-2.0.0.jar=init" `
+  '-Djava.awt.headless=true' "-Dplugins.dir=$fiji" `
+  -cp "$fiji\jars\*;$fiji\plugins\*" net.imagej.Main --headless `
+  --run 'C:\path\to\IF_Quant_Pipeline.groovy'
+```
+
+The script exits automatically after all headless exports complete. StarDist's
+ROI Manager output remains interactive-only; use the classic segmenter for
+unattended jobs.
+
+Paths and test selection can be supplied without editing the Groovy file:
+
+```powershell
+$env:IFQ_INPUT_DIR = 'G:\내 드라이브\260719-CW'
+$env:IFQ_OUTPUT_DIR = "$PWD\test_runs\260719-CW_CC10_smoke"
+$env:IFQ_PANEL = 'E'                 # M=4x DAPI/CC10/tdTOM; E/R=20x panels
+$env:IFQ_RECURSIVE = 'true'
+$env:IFQ_INCLUDE_REGEX = '.*CC10_488.*20x 2k_Cycle.*G001_0001\.oir$'
+$env:IFQ_MAX_IMAGES = '1'            # 0 means all matching files
+$env:IFQ_TISSUE_MODE = 'whole_field' # count disconnected DAPI objects across the field
+$env:IFQ_COMPARTMENT_MODE = 'required' # final run: require alveoli/airway ROI names
+$env:IFQ_T1A_THRESHOLD = '887.2'        # example only; freeze from controls
+$env:IFQ_MRAGE_THRESHOLD = '503.1'      # example only; freeze from controls
+$env:IFQ_T1A_MIN_RING_FRACTION = '0.30' # pilot value; validate before freezing
+$env:IFQ_MRAGE_MIN_RING_FRACTION = '0.30'
+$env:IFQ_DAPI_METHOD = 'local_phansalkar' # uneven-illumination alternative
+$env:IFQ_DAPI_BACKGROUND_RADIUS_UM = '15'
+$env:IFQ_DAPI_LOCAL_RADIUS_UM = '4'
+$env:IFQ_DAPI_BLUR_SIGMA_PX = '1'
+$env:IFQ_MIN_NUCLEUS_AREA_UM2 = '8' # pilot sensitivity; freeze after manual QC
+$env:IFQ_ACTUB_SUPPORT_EXPAND_UM = '6'       # nucleus-to-apical-cilia support zone
+$env:IFQ_ACTUB_MIN_SUPPORT_FRACTION = '0.02' # exploratory; freeze from controls
+$env:IFQ_ACTUB_MIN_PATCH_AREA_UM2 = '0.5'    # 20x ciliary patch, not one axoneme
+```
+
+The 260719-CW filename convention is recognized automatically: mouse/date,
+condition, section, and panel M/E/R are inferred. A `samplesheet.csv` remains
+authoritative when supplied. Recursive runs add a stable suffix for duplicate
+basenames so `Cycle` and `Cycle_01` data cannot overwrite each other.
+Output folders and files use the concise pattern
+`<mouse>_<condition>_<panel>_<section>`; the complete acquisition filename is
+retained in `run_manifest.json` and each `__params.json` file.
+
+Panel-R QC images display DAPI/T1A/tdTOM/mRAGE as blue/green/red/white.
+Cyan is the only per-object outline and marks counted DAPI nuclei. Orange marks
+the analysis ROI; green/red/white boundaries mark continuous fluorescence
+regions for T1A/tdTOM/mRAGE. Rejected DAPI candidates remain available in the
+separate `__rejected_nuclei_mask.tif` audit image.
+
+For DAPI tuning, the default `local_phansalkar` path adds rolling-background
+removal, gentle Gaussian smoothing, contrast normalization, local Phansalkar
+thresholding, hole filling, and watershed; `global_otsu` preserves the original
+fallback. Each run exports a display-balanced DAPI-only QC PNG and the actual
+binary `__DAPI_candidate_mask.tif`. Display color balance does not alter the
+mask; analytical preprocessing parameters are recorded in `__params.json`.
+
+For morphology-aware final calls, draw compartment ROIs before looking at the
+target-channel quantification and name each ROI `alveoli`, `airway`, or
+`ambiguous` (suffixes such as `alveoli_01` are allowed). Put them in the usual
+per-image ROI ZIP and set `IFQ_COMPARTMENT_MODE=required`. For T1A and mRAGE the
+pipeline then exports three distinct decisions: intensity above a predeclared
+cutoff, fraction of the perinuclear ring above that cutoff, and compartment
+consistency. `<marker>_true_pos` is assigned only when all three pass; it is
+left blank when morphology is unassigned. Thresholds and minimum ring fractions
+must be selected from negative/positive controls and frozen before the study
+groups are compared; the example values above are not validated cutoffs.
+
 ---
 
 ## 6. Input data expectations
 
-- **Formats:** anything Bio-Formats reads (`.czi`, `.lif`, `.nd2`, `.oib`,
+- **Formats:** anything Bio-Formats reads (`.czi`, `.lif`, `.nd2`, `.oir`, `.oib`,
   `.oif`, `.ics`, `.tif/.tiff`). Adjust `FILE_GLOB` to widen/narrow.
 - **Calibration:** must be embedded in the file (µm/pixel, Z-step). The pipeline
   reads and preserves it; all areas/distances are reported in µm/µm².
@@ -149,12 +254,23 @@ Every requested feature maps to the pipeline:
 | `POD_MIN_AREA_UM2` | minimum particle size to count as a KRT5⁺ pod |
 | `POD_THRESH_METHOD` | auto-threshold method for the pod mask (`Otsu`, `Li`, …) |
 | `POS_SENSITIVITY` | per-marker multiplier on the auto threshold (`>1` stricter, `<1` more permissive) |
+| `IFQ_MORPHOLOGY_PRIMARY` | `true` by default; makes the three-state morphology call authoritative |
+| `IFQ_WHOLE_FIELD_COMPARTMENT` | explicit compartment for a visually reviewed homogeneous field: `airway`, `alveolar`, `ambiguous`, or `unassigned` |
+| `IFQ_<MARKER>_THRESHOLD` | fixed control-derived candidate-pixel cutoff for a marker |
+| `IFQ_<MARKER>_MIN_POSITIVE_FRACTION` | minimum fraction of the role-specific support above cutoff |
+| `IFQ_<MARKER>_MIN_LARGEST_COMPONENT_SHARE` | minimum connectedness of positive support |
+| `IFQ_ACTUB_SUPPORT_EXPAND_UM` | radius beyond each nucleus used for AcTub proximity association |
+| `IFQ_ACTUB_MIN_SUPPORT_FRACTION` | minimum fraction of that support zone above the AcTub threshold |
+| `IFQ_ACTUB_MIN_PATCH_AREA_UM2` | minimum connected AcTub ciliary-patch area at 20x |
 | `TISSUE_THRESH_METHOD` / `TISSUE_MIN_AREA_UM2` | auto tissue detection when no manual ROI |
 
-**Positivity rule:** an object is positive for a marker if its mean raw
-intensity ≥ (Otsu threshold computed **within that tissue region**) ×
-`POS_SENSITIVITY[marker]`. Thresholds adapt per image/region; the *resolved*
-numeric cutoff is exported so you can audit it.
+**Positivity rule:** the resolved intensity cutoff is applied to pixels, and the
+marker-specific morphology gates authorize the final call. Object mean intensity
+is exported for audit but is not final-call authority. AcTub additionally
+requires an airway ROI for a per-cell interpretation; its primary 20x outputs
+remain regional ciliary area and connected patches. CC10 positivity denotes
+protein phenotype and must not be used alone to infer club-cell lineage after
+injury.
 
 ---
 
@@ -171,17 +287,43 @@ OUTPUT_DIR/
     ├── <stem>__params.json             # per-image parameters, calibration, channel map, thresholds
     ├── <stem>__<region>__QC.png        # QC overlay: tissue (white), nuclei (cyan), KRT5⁺ (magenta), pods (yellow)
     ├── <stem>__<region>__nuclei_mask.tif  # 16-bit label mask of nuclei
-    └── <stem>__KRT5_pod_mask.tif       # binary pod mask (255 = KRT5⁺ pod)
+    ├── <stem>__<region>__<marker>_morphology_positive_nuclei_mask.tif
+    ├── <stem>__<region>__<marker>_indeterminate_nuclei_mask.tif
+    ├── <stem>__<region>__<marker>_CALL_QC.png  # final positive/negative/indeterminate overlay
+    ├── <stem>__KRT5_pod_mask.tif       # binary pod mask (255 = KRT5⁺ pod)
+    ├── <stem>__tdTOM_reporter_positive_mask.tif
+    ├── <stem>__AcTub_ciliary_mask.tif  # area-filtered ciliary patches
+    └── <stem>__T1A_membrane_positive_mask.tif  # analogous AGER/PDPN/mRAGE masks
 ```
+
+`<stem>` is a concise channel signature so every exported file is
+self-describing, for example
+`C1-DAPI_C2-T1alpha-488_C3-tdTOM_C4-mRAGE-647__cells.csv`. The containing
+directory carries the specimen ID, avoiding the long duplicated paths that
+Windows may fail to open. The same signature is stored in `__params.json` and
+`run_manifest.json`. For panels without a recorded fluorophore, the channel's
+biological marker name is used.
 
 **Key `run_summary.csv` columns** (marker columns vary by panel):
 
 - `mouse_id, section_id, genotype, condition, panel, region` — identifiers.
 - `region_area_um2, n_nuclei` — denominators.
-- `<marker>_pos_count`, `<marker>_density_per_mm2`, `<marker>_pos_threshold`.
+- `<marker>_pos_count`, `<marker>_density_per_mm2` — morphology-authoritative
+  positives; `<marker>_raw_mean_pos_count` preserves the legacy intensity audit.
+- `<marker>_pos_threshold` and `<marker>_threshold_source` — resolved cutoff and
+  whether it was fixed or adaptive.
+- `<marker>_morphology_pos_count`, `<marker>_morphology_negative_count`,
+  `<marker>_indeterminate_count`, `<marker>_morphology_evaluable_count` — the
+  authoritative three-state decision summary.
 - `KRT5_pod_area_um2`, `KRT5_pod_area_frac`, `KRT5_n_pods`,
   `KRT5_mean_pod_area_um2`, `KRT5_pod_threshold` — **primary endpoint**.
-- `class_<rule>_count` — double +/− populations (e.g. `class_KRT5+_AGER-_count`).
+- `<marker>_positive_area_um2`, `<marker>_positive_area_frac`,
+  `<marker>_n_components`, `<marker>_area_mode` — morphology-neutral regional
+  fields; for panel E the modes are `reporter` (tdTomato) and `ciliary` (AcTub).
+  Components below the declared physical minimum are excluded from the saved
+  mask and from the area endpoint.
+- `class_<rule>_count`, `class_<rule>_evaluable_count`, and
+  `class_<rule>_indeterminate_count` — classifications consume only final calls.
 
 After `aggregate_to_mouse.py` you also get:
 
@@ -231,9 +373,10 @@ sections as repeated measures).
 - **Projection matters.** MAX projection is fine for pod **area**. For **YAP**
   (Scheme 2) a MAX projection corrupts the nuclear:cytoplasmic ratio — set
   `PROJECTION="single"` and use one representative plane.
-- **Auto thresholds are placeholders.** They adapt per image but you must
-  confirm positivity against QC overlays and freeze sensitivities before
-  reporting.
+- **Auto thresholds are exploratory placeholders.** They adapt per image and
+  define candidate pixels for morphology gates. Confirm them against controls,
+  replace them with fixed marker cutoffs, and freeze every morphology parameter
+  before reporting confirmatory results.
 - **Ligand vs. receptor KO** and **viral load** — see §1.
 
 ---
