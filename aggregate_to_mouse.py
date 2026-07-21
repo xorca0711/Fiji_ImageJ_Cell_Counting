@@ -14,7 +14,8 @@ directly would pseudo-replicate and inflate significance.
 
 Pooling is area-weighted (the statistically correct pooling for a section):
   * KRT5 pod area fraction   = sum(pod_area) / sum(tissue_area)      per mouse
-  * marker density (/mm2)    = sum(pos_count) / sum(tissue_area_mm2) per mouse
+  * marker density (/mm2)    = sum(morphology-authoritative pos_count)
+                               / sum(tissue_area_mm2) per mouse
   * mean pod size            = sum(pod_area) / sum(n_pods)           per mouse
 Counts and areas are summed; thresholds are averaged (QC only).
 
@@ -67,18 +68,48 @@ def read_rows(path):
 
 def classify_columns(header):
     """Group measurement columns by how they must be pooled."""
-    pos_count = [c for c in header if c.endswith("_pos_count")]
+    # The plain <marker>_pos_count field is morphology-authoritative. Keep the
+    # explicitly named raw-mean and state-audit fields in separate categories so
+    # they cannot silently become the statistical endpoint.
+    pos_count = [
+        c for c in header
+        if c.endswith("_pos_count")
+        and not c.endswith("_morphology_pos_count")
+        and not c.endswith("_raw_mean_pos_count")
+        and not c.endswith("_true_pos_count")
+    ]
+    raw_mean_pos_count = [c for c in header if c.endswith("_raw_mean_pos_count")]
+    morphology_pos_count = [c for c in header if c.endswith("_morphology_pos_count")]
+    morphology_negative_count = [c for c in header if c.endswith("_morphology_negative_count")]
+    marker_indeterminate_count = [
+        c for c in header if c.endswith("_indeterminate_count")
+        and not c.startswith("class_")
+    ]
+    morphology_evaluable_count = [c for c in header if c.endswith("_morphology_evaluable_count")]
     # total pod area only -- exclude the derived per-region MEAN pod size, which
     # also ends in "_pod_area_um2" and would otherwise be summed as an area.
     pod_area = [c for c in header
                 if c.endswith("_pod_area_um2") and not c.endswith("_mean_pod_area_um2")]
     n_pods = [c for c in header if c.endswith("_n_pods")]
-    class_count = [c for c in header if c.startswith("class_") and c.endswith("_count")]
+    class_count = [
+        c for c in header if c.startswith("class_") and c.endswith("_count")
+        and not c.endswith("_evaluable_count")
+        and not c.endswith("_indeterminate_count")
+    ]
+    class_evaluable_count = [c for c in header if c.startswith("class_") and c.endswith("_evaluable_count")]
+    class_indeterminate_count = [c for c in header if c.startswith("class_") and c.endswith("_indeterminate_count")]
     # everything else numeric-ish that we simply sum or average
-    sum_cols = set(["region_area_um2", "n_nuclei"]) | set(pos_count) | set(pod_area) | set(n_pods) | set(class_count)
+    state_counts = (set(raw_mean_pos_count) | set(morphology_pos_count) |
+                    set(morphology_negative_count) | set(marker_indeterminate_count) |
+                    set(morphology_evaluable_count) | set(class_evaluable_count) |
+                    set(class_indeterminate_count))
+    sum_cols = (set(["region_area_um2", "n_nuclei"]) | set(pos_count) |
+                set(pod_area) | set(n_pods) | set(class_count) | state_counts)
     # derived columns we recompute (do NOT sum): fractions, densities, mean pod size, thresholds
     return {
         "pos_count": pos_count,
+        "raw_mean_pos_count": raw_mean_pos_count,
+        "state_counts": sorted(state_counts),
         "pod_area": pod_area,
         "n_pods": n_pods,
         "class_count": class_count,
@@ -122,6 +153,18 @@ def aggregate_mice(header, rows):
             m = marker_of(c, "_pos_count")
             rec[f"{m}_pos_count_total"] = sums[c]
             rec[f"{m}_density_per_mm2"] = (sums[c] / total_area_mm2) if total_area_mm2 > 0 else 0.0
+
+        # --- explicit audit/state totals; never substitute for the endpoint ---
+        for c in cats["raw_mean_pos_count"]:
+            m = marker_of(c, "_raw_mean_pos_count")
+            rec[f"{m}_raw_mean_pos_count_total"] = sums[c]
+            rec[f"{m}_raw_mean_density_per_mm2"] = (
+                sums[c] / total_area_mm2 if total_area_mm2 > 0 else 0.0
+            )
+        for c in cats["state_counts"]:
+            if c in cats["raw_mean_pos_count"]:
+                continue
+            rec[f"{c}_total"] = sums[c]
 
         # --- pod area, fraction, count, mean size (per area-marker, e.g. KRT5) ---
         for c in cats["pod_area"]:

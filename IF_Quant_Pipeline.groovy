@@ -47,9 +47,10 @@
  *   * n IS COUNTED BY MICE, NOT SECTIONS. mouse_id/section_id travel through
  *     every export so you can aggregate to biological n downstream. Three
  *     technical sections from one animal are still n = 1.
- *   * DEFAULT THRESHOLDS ARE PLACEHOLDERS. Auto-Otsu adapts per image, but you
- *     MUST confirm positivity calls against the QC overlays and set per-marker
- *     sensitivity before reporting. Freeze parameters once, then batch.
+ *   * DEFAULT THRESHOLDS AND MORPHOLOGY GATES ARE PILOT PLACEHOLDERS. Auto-Otsu
+ *     adapts per image and therefore produces exploratory calls only. Derive
+ *     fixed cutoffs from controls, validate the spatial gates, freeze all
+ *     parameters once, then batch the study cohort.
  *   * AGER is a thin AT1 membrane signal; per-cell mean is weak. KRT5+/AGER-
  *     is most robust as an AREA relationship (pod area vs AT1 area). The
  *     per-object AGER call is provided but interpret it conservatively.
@@ -115,10 +116,18 @@ def MAX_IMAGES  = Integer.parseInt(envOr("IFQ_MAX_IMAGES", "0")) // 0 = all
 def TISSUE_MODE = envOr("IFQ_TISSUE_MODE", "auto").toLowerCase() // auto | whole_field
 def COMPARTMENT_MODE = envOr("IFQ_COMPARTMENT_MODE", "optional").toLowerCase() // optional | required
 def FIXED_POS_THRESHOLDS = [:]
-[[marker:"T1A", env:"IFQ_T1A_THRESHOLD"],
- [marker:"mRAGE", env:"IFQ_MRAGE_THRESHOLD"]].each { spec ->
-  def rawValue = System.getenv(spec.env)
-  if (rawValue != null && !rawValue.trim().isEmpty()) FIXED_POS_THRESHOLDS[spec.marker] = Double.parseDouble(rawValue.trim())
+// Any marker can use a control-derived fixed cutoff via IFQ_<MARKER>_THRESHOLD.
+// Adaptive Otsu remains available for pilots but is explicitly reported as
+// exploratory. Examples: IFQ_CC10_THRESHOLD, IFQ_TDTOM_THRESHOLD.
+def thresholdMarkers = ["KRT5", "AGER", "PDPN", "ProSPC", "CD8", "CD4",
+                        "Sox2", "Aqp5", "p63", "YAP", "CC10", "tdTOM",
+                        "AcTub", "T1A", "mRAGE"]
+thresholdMarkers.each { marker ->
+  String token = marker.toUpperCase().replaceAll(/[^A-Z0-9]+/, "")
+  def rawValue = System.getenv("IFQ_" + token + "_THRESHOLD")
+  if (rawValue != null && !rawValue.trim().isEmpty()) {
+    FIXED_POS_THRESHOLDS[marker] = Double.parseDouble(rawValue.trim())
+  }
 }
 def MIN_RING_POS_FRACTION = [
   "T1A": Double.parseDouble(envOr("IFQ_T1A_MIN_RING_FRACTION", "0.30")),
@@ -130,8 +139,43 @@ def MIN_RING_POS_FRACTION = [
 // wider proximity support zone and report ciliary patches as the primary
 // regional readout. These pilot defaults must still be frozen against controls.
 def ACTUB_SUPPORT_EXPAND_UM = Double.parseDouble(envOr("IFQ_ACTUB_SUPPORT_EXPAND_UM", "6.0"))
-def ACTUB_MIN_SUPPORT_FRACTION = Double.parseDouble(envOr("IFQ_ACTUB_MIN_SUPPORT_FRACTION", "0.02"))
-def ACTUB_MIN_PATCH_AREA_UM2 = Double.parseDouble(envOr("IFQ_ACTUB_MIN_PATCH_AREA_UM2", "0.50"))
+def ACTUB_MIN_SUPPORT_FRACTION = Double.parseDouble(envOr("IFQ_ACTUB_MIN_SUPPORT_FRACTION", "0.10"))
+def ACTUB_MIN_PATCH_AREA_UM2 = Double.parseDouble(envOr("IFQ_ACTUB_MIN_PATCH_AREA_UM2", "2.0"))
+
+// Morphology is the authoritative marker call. Intensity thresholds define
+// candidate pixels; a final positive additionally requires role-appropriate
+// coverage, connected spatial support, compartment, and object ownership.
+// Defaults are conservative PILOT values and must be calibrated from blinded
+// positive/negative controls before a final cohort run.
+def MORPHOLOGY_PRIMARY = envOr("IFQ_MORPHOLOGY_PRIMARY", "true").toBoolean()
+def MORPHOLOGY_RULES = [
+  "KRT5" : [minFraction:0.20d, minLargestShare:0.50d, requireOwnership:true],
+  "AGER" : [minFraction:0.25d, minLargestShare:0.40d, requireOwnership:true],
+  "PDPN" : [minFraction:0.25d, minLargestShare:0.40d, requireOwnership:true],
+  "ProSPC":[minFraction:0.15d, minLargestShare:0.40d, requireOwnership:true],
+  "CD8"  : [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
+  "CD4"  : [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
+  "Sox2" : [minFraction:0.40d, minLargestShare:0.60d, requireOwnership:false, minNuclearEnrichment:1.25d],
+  "Aqp5" : [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
+  "p63"  : [minFraction:0.40d, minLargestShare:0.60d, requireOwnership:false, minNuclearEnrichment:1.25d],
+  "YAP"  : [minFraction:0.30d, minLargestShare:0.60d, requireOwnership:false, minNucCytoRatio:1.50d],
+  "CC10" : [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
+  "tdTOM":[minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
+  "AcTub":[minFraction:ACTUB_MIN_SUPPORT_FRACTION, minLargestShare:0.30d, requireOwnership:true],
+  "T1A"  : [minFraction:MIN_RING_POS_FRACTION["T1A"], minLargestShare:0.40d, requireOwnership:true],
+  "mRAGE":[minFraction:MIN_RING_POS_FRACTION["mRAGE"], minLargestShare:0.40d, requireOwnership:true]
+]
+MORPHOLOGY_RULES.each { marker, rule ->
+  String token = marker.toUpperCase().replaceAll(/[^A-Z0-9]+/, "")
+  rule.minFraction = Double.parseDouble(envOr("IFQ_" + token + "_MIN_POSITIVE_FRACTION", rule.minFraction.toString()))
+  rule.minLargestShare = Double.parseDouble(envOr("IFQ_" + token + "_MIN_LARGEST_COMPONENT_SHARE", rule.minLargestShare.toString()))
+  if (rule.containsKey("minNuclearEnrichment")) {
+    rule.minNuclearEnrichment = Double.parseDouble(envOr("IFQ_" + token + "_MIN_NUCLEAR_ENRICHMENT", rule.minNuclearEnrichment.toString()))
+  }
+  if (rule.containsKey("minNucCytoRatio")) {
+    rule.minNucCytoRatio = Double.parseDouble(envOr("IFQ_" + token + "_MIN_NUC_CYTO_RATIO", rule.minNucCytoRatio.toString()))
+  }
+}
 def DAPI_METHOD = envOr("IFQ_DAPI_METHOD", "local_phansalkar").toLowerCase() // local_phansalkar | global_otsu
 def DAPI_BACKGROUND_RADIUS_UM = Double.parseDouble(envOr("IFQ_DAPI_BACKGROUND_RADIUS_UM", "15.0"))
 def DAPI_LOCAL_RADIUS_UM = Double.parseDouble(envOr("IFQ_DAPI_LOCAL_RADIUS_UM", "4.0"))
@@ -162,9 +206,10 @@ def POD_MIN_AREA_UM2    = 50.0  // a "pod" particle must exceed this
 def POD_BLUR_SIGMA_PX   = 2.0
 def POD_THRESH_METHOD   = "Otsu" // Otsu|Triangle|Li|Huang|MaxEntropy...
 
-// --- Positivity ---
-// Object is positive if its mean (raw) >= channelOtsu(inTissue) * sensitivity.
-// Tune per marker: >1 = stricter, <1 = more permissive.
+// --- Candidate-pixel intensity cutoffs ---
+// Otsu(inTissue) * sensitivity supplies a pilot threshold for spatial-support
+// measurements. The morphology gates above, not the object mean, authorize the
+// final call. Fixed control-derived thresholds should replace Otsu for final use.
 def POS_SENSITIVITY = [ "KRT5":1.00, "AGER":1.00, "PDPN":1.00, "ProSPC":1.00,
                         "CD8":1.00, "CD4":1.00, "Sox2":1.00, "Aqp5":1.00,
                         "p63":1.00, "YAP":1.00, "CC10":1.00, "tdTOM":1.00,
@@ -178,8 +223,8 @@ def TISSUE_MIN_AREA_UM2   = 2000.0     // drop debris specks
 // ============================================================================
 //  2. PANEL DEFINITIONS  (channel idx is 1-based ACQUISITION order)
 //     role: "nuclear"   -> segmentation channel (DAPI)
-//           "cyto"      -> measured in perinuclear ring (KRT5, Pro-SPC, CD8, CD4)
-//           "membrane"  -> measured in ring; interpret as area too (AGER/PDPN)
+//           "cyto"      -> measured in perinuclear ring (KRT5, Pro-SPC, CC10)
+//           "membrane"  -> measured in ring (AGER/PDPN/CD4/CD8)
 //           "nuc_marker"-> measured in the nucleus (p63)
 //           "nuc_ratio" -> nucleus vs ring separately (YAP)  [needs single plane]
 //     areaMarker: also run independent threshold AREA quantification (KRT5 pod)
@@ -189,32 +234,32 @@ def PANELS = [
   "A": [ label:"A_KRT5_AGER",
     channels:[ [idx:1, marker:"DAPI",  role:"nuclear"],
                [idx:2, marker:"KRT5",  role:"cyto",     areaMarker:true],
-               [idx:3, marker:"AGER",  role:"membrane"] ],
+               [idx:3, marker:"AGER",  role:"membrane", expectedCompartment:"alveolar"] ],
     classify:[ ["KRT5":true,"AGER":false], ["KRT5":true,"AGER":true] ] ],
 
   "B": [ label:"B_KRT5_ProSPC",
     channels:[ [idx:1, marker:"DAPI",   role:"nuclear"],
                [idx:2, marker:"KRT5",   role:"cyto",    areaMarker:true],
-               [idx:3, marker:"ProSPC", role:"cyto"] ],
+               [idx:3, marker:"ProSPC", role:"cyto", expectedCompartment:"alveolar"] ],
     classify:[ ["KRT5":true,"ProSPC":false], ["KRT5":false,"ProSPC":true] ] ],
 
   "C": [ label:"C_KRT5_CD8",
     channels:[ [idx:1, marker:"DAPI", role:"nuclear"],
                [idx:2, marker:"KRT5", role:"cyto",     areaMarker:true],
-               [idx:3, marker:"CD8",  role:"cyto"] ],
+               [idx:3, marker:"CD8",  role:"membrane"] ],
     classify:[ ["CD8":true], ["KRT5":true,"CD8":true] ] ],
 
   "D": [ label:"D_KRT5_CD4",
     channels:[ [idx:1, marker:"DAPI", role:"nuclear"],
                [idx:2, marker:"KRT5", role:"cyto",     areaMarker:true],
-               [idx:3, marker:"CD4",  role:"cyto"] ],
+               [idx:3, marker:"CD4",  role:"membrane"] ],
     classify:[ ["CD4":true], ["KRT5":true,"CD4":true] ] ],
 
   // AT1 alternative via podoplanin (T1-alpha). Enables the KRT5+/PDPN- readout.
   "P": [ label:"P_KRT5_PDPN",
     channels:[ [idx:1, marker:"DAPI", role:"nuclear"],
                [idx:2, marker:"KRT5", role:"cyto",     areaMarker:true],
-               [idx:3, marker:"PDPN", role:"membrane"] ],
+               [idx:3, marker:"PDPN", role:"membrane", expectedCompartment:"alveolar"] ],
     classify:[ ["KRT5":true,"PDPN":false], ["KRT5":true,"PDPN":true] ] ],
 
   // Optional airway/epithelial marker.
@@ -542,6 +587,85 @@ def fractionAboveThreshold(ImagePlus imp, Roi roi, double threshold) {
   return total > 0 ? positive / (double)total : 0.0d
 }
 
+// Morphology support inside an object ROI. In addition to total positive
+// coverage, report how much of the positive signal belongs to the largest
+// 8-connected component. A high largest-component share distinguishes a
+// coherent nuclear/cytoplasmic/membrane pattern from scattered bright specks.
+def spatialSupportStats(ImagePlus imp, Roi roi, double threshold) {
+  if (roi == null) return [total:0L, positive:0L, fraction:0.0d,
+                           components:0, largest:0L, largestShare:0.0d]
+  ImageProcessor ip = imp.getProcessor()
+  Rectangle b = roi.getBounds()
+  ImageProcessor rm = roi.getMask()
+  int bw = (int)b.width, bh = (int)b.height
+  if (bw <= 0 || bh <= 0) return [total:0L, positive:0L, fraction:0.0d,
+                                  components:0, largest:0L, largestShare:0.0d]
+  boolean[] positiveMask = new boolean[bw * bh]
+  long total = 0L, positive = 0L
+  for (int yy = 0; yy < bh; yy++) {
+    for (int xx = 0; xx < bw; xx++) {
+      if (rm != null && rm.get(xx, yy) == 0) continue
+      int x = (int)b.x + xx, y = (int)b.y + yy
+      if (x < 0 || y < 0 || x >= ip.getWidth() || y >= ip.getHeight()) continue
+      total++
+      if (ip.getPixelValue(x, y) >= threshold) {
+        positiveMask[yy * bw + xx] = true
+        positive++
+      }
+    }
+  }
+
+  boolean[] visited = new boolean[bw * bh]
+  int[] queue = new int[bw * bh]
+  int components = 0
+  long largest = 0L
+  int[] dx = [-1, 0, 1, -1, 1, -1, 0, 1] as int[]
+  int[] dy = [-1, -1, -1, 0, 0, 1, 1, 1] as int[]
+  for (int start = 0; start < positiveMask.length; start++) {
+    if (!positiveMask[start] || visited[start]) continue
+    components++
+    int head = 0, tail = 0
+    queue[tail++] = start
+    visited[start] = true
+    long size = 0L
+    while (head < tail) {
+      int idx = queue[head++]
+      size++
+      int x0 = idx % bw, y0 = (int)(idx / bw)
+      for (int k = 0; k < 8; k++) {
+        int nx = x0 + dx[k], ny = y0 + dy[k]
+        if (nx < 0 || ny < 0 || nx >= bw || ny >= bh) continue
+        int ni = ny * bw + nx
+        if (positiveMask[ni] && !visited[ni]) {
+          visited[ni] = true
+          queue[tail++] = ni
+        }
+      }
+    }
+    if (size > largest) largest = size
+  }
+  return [total:total, positive:positive,
+          fraction:(total > 0 ? positive / (double)total : 0.0d),
+          components:components, largest:largest,
+          largestShare:(positive > 0 ? largest / (double)positive : 0.0d)]
+}
+
+// Strict ownership screen for nucleus-associated measurements. If a support
+// territory encloses another nucleus centroid, pixels cannot be assigned to one
+// cell unambiguously without a full membrane/cell segmentation; leave the final
+// call indeterminate instead of double-counting shared signal.
+def supportHasOtherNucleus(Roi support, int currentIndex, nuclei) {
+  if (support == null) return true
+  for (int j = 0; j < nuclei.size(); j++) {
+    if (j == currentIndex) continue
+    Rectangle nb = nuclei[j].getBounds()
+    int cx = (int)Math.round(nb.getCenterX())
+    int cy = (int)Math.round(nb.getCenterY())
+    if (support.contains(cx, cy)) return true
+  }
+  return false
+}
+
 def buildMaskAtThreshold(ImagePlus ch, double threshold) {
   ImagePlus dup = ch.duplicate()
   double upper = ch.getBitDepth() == 8 ? 255.0d : (ch.getBitDepth() == 16 ? 65535.0d : Double.MAX_VALUE)
@@ -803,9 +927,14 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     def nuclei = segmentation.included
     def rejectedNuclei = segmentation.rejected ?: []
     def posCount = [:].withDefault { 0 }
-    def truePosCount = [:].withDefault { 0 }
+    def finalPosCount = [:].withDefault { 0 }
+    def finalNegCount = [:].withDefault { 0 }
+    def indeterminateCount = [:].withDefault { 0 }
     def classCount = [:].withDefault { 0 }
+    def classEvaluableCount = [:].withDefault { 0 }
     def allNucRois = []
+    def finalPositiveRois = [:].withDefault { [] }
+    def indeterminateRois = [:].withDefault { [] }
 
     nuclei.eachWithIndex { nuc, ni ->
       allNucRois << nuc
@@ -817,24 +946,40 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       def cs = measureRoi(dapi, nuc)
       row.centroid_x_um = cs.cx; row.centroid_y_um = cs.cy; row.nucleus_area_um2 = cs.area
 
-      def calls = [:]
+      def calls = [:]       // morphology-authoritative three-state calls: 1, 0, or ""
+      def rawCalls = [:]    // legacy mean-intensity calls retained for audit only
       panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
         def m = c.marker
         def img = markerImg[m]
+        def rule = cfg.morphologyRules[m] ?: [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true]
         def spatialRoi = nuc
-        double val, nucVal = 0, ringVal = 0
+        def ownershipSupport = null
+        double val, nucVal = 0.0d, cytoVal = 0.0d, enrichmentRatio = 0.0d
+        boolean projectionValid = true
         if (c.role == "nuc_marker") {
           val = measureRoi(img, nuc).mean
+          nucVal = val
+          def ring = ringOnly(nuc, cellRoi)
+          cytoVal = ring != null ? measureRoi(img, ring).mean : 0.0d
+          enrichmentRatio = cytoVal > 0 ? nucVal / cytoVal : (nucVal > 0 ? Double.POSITIVE_INFINITY : 0.0d)
+          row[m + "_nuc_mean"] = nucVal
+          row[m + "_reference_ring_mean"] = cytoVal
+          row[m + "_nuclear_enrichment_ratio"] = enrichmentRatio
         } else if (c.role == "nuc_ratio") {
           nucVal = measureRoi(img, nuc).mean
           // true cytoplasmic ring = (enlarged cell) MINUS (nucleus)
           def ring = ringOnly(nuc, cellRoi)
-          double cytoVal = (ring != null) ? measureRoi(img, ring).mean : measureRoi(img, cellRoi).mean
+          cytoVal = (ring != null) ? measureRoi(img, ring).mean : measureRoi(img, cellRoi).mean
           spatialRoi = (ring != null) ? ring : cellRoi
-          val = nucVal   // positivity uses nuclear signal for YAP
+          // Morphology support is measured in the nucleus; the cytoplasmic
+          // ring supplies the localization ratio, not the positive pixels.
+          spatialRoi = nuc
+          val = nucVal
+          enrichmentRatio = cytoVal > 0 ? nucVal / cytoVal : (nucVal > 0 ? Double.POSITIVE_INFINITY : 0.0d)
           row[m + "_nuc_mean"] = nucVal
           row[m + "_cyto_mean"] = cytoVal
-          row[m + "_nuc_cyto_ratio"] = (cytoVal > 0 ? nucVal/cytoVal : 0)
+          row[m + "_nuc_cyto_ratio"] = enrichmentRatio
+          projectionValid = raw.getNSlices() <= 1 || cfg.projection == "single"
         } else if (c.role == "apical_cilia") {
           // Ciliary axonemes sit on the luminal/apical surface and commonly lie
           // beyond a 2-um cytoplasmic ring in tissue sections. Use a wider
@@ -842,52 +987,133 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
           // image/region threshold rather than by a diluted support-zone mean.
           def support = RoiEnlarger.enlarge(nuc, (int)Math.round(cfg.actubSupportExpandUm / cal.pixelWidth))
           spatialRoi = support ?: cellRoi
+          ownershipSupport = spatialRoi
           val = measureRoi(img, spatialRoi).mean
-          double supportFraction = fractionAboveThreshold(img, spatialRoi, chThresh[m])
-          row[m + "_support_fraction_above_threshold"] = supportFraction
-          row[m + "_minimum_support_fraction"] = cfg.actubMinSupportFraction
           row[m + "_support_expand_um"] = cfg.actubSupportExpandUm
           row[m + "_measurement_model"] = c.measurement ?: "apical_cilia_proximity"
         } else { // cyto / membrane: measure the perinuclear ring, not nucleus + ring
           def ring = ringOnly(nuc, cellRoi)
           spatialRoi = (ring != null) ? ring : cellRoi
+          ownershipSupport = cellRoi
           val = measureRoi(img, spatialRoi).mean
           row[m + "_measurement_model"] = c.measurement ?: "perinuclear_ring"
         }
+
+        def supportStats = spatialSupportStats(img, spatialRoi, chThresh[m])
+        double minFraction = (double)rule.minFraction
+        double minLargestShare = (double)rule.minLargestShare
+        boolean fractionPass = supportStats.fraction >= minFraction
+        boolean connectedPass = supportStats.largestShare >= minLargestShare
+        boolean ownershipClear = !(rule.requireOwnership ?: false) ||
+                                 !supportHasOtherNucleus(ownershipSupport, ni, nuclei)
+        boolean enrichmentPass = true
+        if (c.role == "nuc_marker") {
+          enrichmentPass = enrichmentRatio >= (double)(rule.minNuclearEnrichment ?: 1.0d)
+        } else if (c.role == "nuc_ratio") {
+          enrichmentPass = enrichmentRatio >= (double)(rule.minNucCytoRatio ?: 1.0d)
+        }
+
+        boolean compartmentAssigned = compartment != "unassigned" && compartment != "ambiguous"
+        boolean compartmentPass = c.expectedCompartment == null ||
+                                  (compartmentAssigned && compartment == c.expectedCompartment)
+        boolean evaluable = supportStats.total > 0 && projectionValid
+        def indeterminateReasons = []
+        if (c.expectedCompartment != null && !compartmentAssigned) {
+          evaluable = false
+          indeterminateReasons << "compartment_unassigned"
+        }
+        if (!ownershipClear) {
+          evaluable = false
+          indeterminateReasons << "shared_perinuclear_support"
+        }
+        if (!projectionValid) {
+          indeterminateReasons << "projection_invalid_for_nuclear_ratio"
+        }
+        if (supportStats.total <= 0) {
+          indeterminateReasons << "empty_spatial_support"
+        }
+
         row[m + "_mean"] = val
-        boolean intensityPos = (c.role == "apical_cilia") ?
-          ((double)row[m + "_support_fraction_above_threshold"] >= cfg.actubMinSupportFraction) :
-          (val >= chThresh[m])
-        calls[m] = intensityPos
-        row[m + "_pos"] = intensityPos ? 1 : 0
+        boolean intensityPos = val >= chThresh[m]
+        rawCalls[m] = intensityPos ? 1 : 0
+        row[m + "_pos"] = intensityPos ? 1 : 0  // legacy/raw audit field
         row[m + "_threshold_source"] = chThreshSource[m]
+        row[m + "_support_fraction_above_threshold"] = supportStats.fraction
+        row[m + "_minimum_support_fraction"] = minFraction
+        row[m + "_positive_component_count"] = supportStats.components
+        row[m + "_largest_positive_component_share"] = supportStats.largestShare
+        row[m + "_minimum_largest_component_share"] = minLargestShare
+        row[m + "_fraction_pass"] = fractionPass ? 1 : 0
+        row[m + "_connected_pattern_pass"] = connectedPass ? 1 : 0
+        row[m + "_ownership_clear"] = ownershipClear ? 1 : 0
+        row[m + "_projection_valid"] = projectionValid ? 1 : 0
+        row[m + "_expected_compartment"] = c.expectedCompartment ?: "none"
+        row[m + "_compartment_pass"] = compartmentPass ? 1 : 0
+        row[m + "_enrichment_pass"] = enrichmentPass ? 1 : 0
+        if (c.role == "membrane" || c.role == "cyto") {
+          row[m + "_ring_fraction_above_threshold"] = supportStats.fraction
+          row[m + "_minimum_ring_fraction"] = minFraction
+        }
+        row[m + "_pattern_pos"] = (fractionPass && connectedPass) ? 1 : 0
+        row[m + "_compartment_consistent"] = c.expectedCompartment == null ? 1 :
+                                              (compartmentAssigned ? (compartmentPass ? 1 : 0) : "")
+
         if (intensityPos) {
           posCount[m] = posCount[m] + 1
         }
-        if (c.expectedCompartment != null) {
-          double fraction = fractionAboveThreshold(img, spatialRoi, chThresh[m])
-          double requiredFraction = c.role == "apical_cilia" ? cfg.actubMinSupportFraction :
-                                    (double)(cfg.minRingPosFraction[m] ?: 0.30d)
-          boolean patternPos = fraction >= requiredFraction
-          def compartmentConsistent = (compartment == "unassigned" || compartment == "ambiguous") ? "" :
-                                       (compartment == c.expectedCompartment ? 1 : 0)
-          def truePos = compartmentConsistent == "" ? "" :
-                        (intensityPos && patternPos && compartmentConsistent == 1 ? 1 : 0)
-          row[m + (c.role == "apical_cilia" ? "_support_fraction_for_true_call" : "_ring_fraction_above_threshold")] = fraction
-          row[m + (c.role == "apical_cilia" ? "_minimum_support_fraction_for_true_call" : "_minimum_ring_fraction")] = requiredFraction
-          row[m + "_pattern_pos"] = patternPos ? 1 : 0
-          row[m + "_expected_compartment"] = c.expectedCompartment
-          row[m + "_compartment_consistent"] = compartmentConsistent
-          row[m + "_true_pos"] = truePos
-          if (truePos == 1) truePosCount[m] = truePosCount[m] + 1
+
+        boolean morphologyPass = fractionPass && connectedPass && enrichmentPass && compartmentPass
+        def finalCall = ""
+        String callStatus
+        def failureReasons = []
+        if (!fractionPass) failureReasons << "insufficient_spatial_coverage"
+        if (!connectedPass) failureReasons << "fragmented_spatial_pattern"
+        if (!enrichmentPass) failureReasons << (c.role == "nuc_ratio" ? "nuc_cyto_ratio_below_minimum" : "nuclear_enrichment_below_minimum")
+        if (!compartmentPass && compartmentAssigned) failureReasons << "wrong_compartment"
+
+        if (!cfg.morphologyPrimary) {
+          finalCall = intensityPos ? 1 : 0
+          callStatus = intensityPos ? "legacy_intensity_positive" : "legacy_intensity_negative"
+        } else if (!evaluable) {
+          finalCall = ""
+          callStatus = "indeterminate"
+          indeterminateCount[m] = indeterminateCount[m] + 1
+        } else {
+          finalCall = morphologyPass ? 1 : 0
+          boolean fixedThreshold = chThreshSource[m] == "fixed_predeclared"
+          callStatus = morphologyPass ?
+                       (fixedThreshold ? "positive" : "exploratory_positive") :
+                       (fixedThreshold ? "negative" : "exploratory_negative")
         }
+        if (finalCall == 1) {
+          finalPosCount[m] = finalPosCount[m] + 1
+          finalPositiveRois[m] << nuc
+        } else if (finalCall == 0) {
+          finalNegCount[m] = finalNegCount[m] + 1
+        } else {
+          indeterminateRois[m] << nuc
+        }
+        calls[m] = finalCall
+        row[m + "_morphology_pass"] = (evaluable && morphologyPass) ? 1 : 0
+        row[m + "_final_call"] = finalCall
+        row[m + "_true_pos"] = finalCall       // compatibility alias
+        row[m + "_call_status"] = callStatus
+        row[m + "_call_reason"] = (indeterminateReasons + failureReasons).unique().join(";")
       }
       // classifications
       panelDef.classify.each { rule ->
-        boolean ok = rule.every { mk, want -> (calls[mk] == want) }
         def key = rule.collect { mk, want -> mk + (want ? "+" : "-") }.join("_")
-        row["class_" + key] = ok ? 1 : 0
-        if (ok) classCount[key] = classCount[key] + 1
+        boolean classEvaluable = rule.every { mk, want -> calls[mk] == 0 || calls[mk] == 1 }
+        if (!classEvaluable) {
+          row["class_" + key] = ""
+          row["class_" + key + "_status"] = "indeterminate"
+        } else {
+          boolean ok = rule.every { mk, want -> calls[mk] == (want ? 1 : 0) }
+          row["class_" + key] = ok ? 1 : 0
+          row["class_" + key + "_status"] = ok ? "positive" : "negative"
+          classEvaluableCount[key] = classEvaluableCount[key] + 1
+          if (ok) classCount[key] = classCount[key] + 1
+        }
       }
       cellRows << row
     }
@@ -917,15 +1143,24 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                  n_rejected_at_image_edge: rejectedNuclei.count { it.reason == "image_edge" },
                  n_rejected_by_particle_filter: rejectedNuclei.count { it.reason == "particle_filter" } ]
     panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
-      srow[c.marker + "_pos_count"] = posCount[c.marker]
-      srow[c.marker + "_density_per_mm2"] = (regionAreaUm2 > 0 ? posCount[c.marker] / (regionAreaUm2/1e6) : 0)
+      // The conventional summary fields follow the authoritative final call.
+      // Raw object-mean decisions remain available under explicit audit names.
+      srow[c.marker + "_pos_count"] = finalPosCount[c.marker]
+      srow[c.marker + "_density_per_mm2"] = (regionAreaUm2 > 0 ? finalPosCount[c.marker] / (regionAreaUm2/1e6) : 0)
+      srow[c.marker + "_raw_mean_pos_count"] = posCount[c.marker]
+      srow[c.marker + "_raw_mean_density_per_mm2"] = (regionAreaUm2 > 0 ? posCount[c.marker] / (regionAreaUm2/1e6) : 0)
       srow[c.marker + "_pos_threshold"] = chThresh[c.marker]   // resolved raw-intensity cutoff
       srow[c.marker + "_threshold_source"] = chThreshSource[c.marker]
       srow[c.marker + "_measurement_model"] = c.measurement ?: c.role
-      if (c.expectedCompartment != null) {
-        srow[c.marker + "_expected_compartment"] = c.expectedCompartment
-        srow[c.marker + "_true_pos_count"] = (compartment == "unassigned" || compartment == "ambiguous") ? "" : truePosCount[c.marker]
-      }
+      srow[c.marker + "_call_authority"] = cfg.morphologyPrimary ? "morphology_primary" : "legacy_mean_intensity"
+      srow[c.marker + "_morphology_pos_count"] = finalPosCount[c.marker]
+      srow[c.marker + "_morphology_negative_count"] = finalNegCount[c.marker]
+      srow[c.marker + "_indeterminate_count"] = indeterminateCount[c.marker]
+      srow[c.marker + "_morphology_evaluable_count"] = finalPosCount[c.marker] + finalNegCount[c.marker]
+      srow[c.marker + "_morphology_density_per_mm2"] =
+        (regionAreaUm2 > 0 ? finalPosCount[c.marker] / (regionAreaUm2/1e6) : 0)
+      srow[c.marker + "_true_pos_count"] = finalPosCount[c.marker] // compatibility alias
+      srow[c.marker + "_expected_compartment"] = c.expectedCompartment ?: "none"
     }
     areaStats.each { m, as ->
       srow[m + "_positive_area_um2"] = as.area_um2
@@ -944,13 +1179,23 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
         srow[m + "_pod_threshold"] = as.threshold
       }
     }
-    classCount.each { k, v -> srow["class_" + k + "_count"] = v }
+    (classCount.keySet() + classEvaluableCount.keySet()).unique().each { k ->
+      srow["class_" + k + "_count"] = classCount[k]
+      srow["class_" + k + "_evaluable_count"] = classEvaluableCount[k]
+      srow["class_" + k + "_indeterminate_count"] = nuclei.size() - classEvaluableCount[k]
+    }
     summaryRows << srow
     qcMasks.each { k, v -> v.close() }
 
     // save nuclei mask for the region
     saveLabelMask(dapi, allNucRois, imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__nuclei_mask.tif")
     saveLabelMask(dapi, rejectedNuclei.collect { it.roi }, imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__rejected_nuclei_mask.tif")
+    panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
+      saveLabelMask(dapi, finalPositiveRois[c.marker],
+                    imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__" + c.marker + "_morphology_positive_nuclei_mask.tif")
+      saveLabelMask(dapi, indeterminateRois[c.marker],
+                    imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__" + c.marker + "_indeterminate_nuclei_mask.tif")
+    }
   }
 
   // Save morphology-specific binary masks with names that describe the unit.
@@ -984,6 +1229,11 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     pod_min_area_um2: cfg.podMinArea, pod_blur_sigma_px: cfg.podBlur, pod_thresh_method: cfg.podMethod,
     pos_sensitivity: cfg.sensitivity, black_background: cfg.blackBackground,
     fixed_pos_thresholds: cfg.fixedThresholds,
+    decision_hierarchy: [ authority: cfg.morphologyPrimary ? "morphology_primary" : "legacy_mean_intensity",
+                          call_states: ["positive", "negative", "indeterminate"],
+                          intensity_role: "candidate-pixel threshold and audit field; not final-call authority",
+                          fixed_threshold_requirement: "confirmatory calls require predeclared control-derived thresholds" ],
+    morphology_rules: cfg.morphologyRules,
     compartment_mode: cfg.compartmentMode,
     minimum_ring_positive_fraction: cfg.minRingPosFraction,
     tissue_mode: cfg.tissueMode, tissue_roi_source: tissue.source,
@@ -1202,6 +1452,7 @@ def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles:
            ringExpandUm: RING_EXPAND_UM, minNucArea: MIN_NUCLEUS_AREA_UM2,
            podMinArea: POD_MIN_AREA_UM2, podBlur: POD_BLUR_SIGMA_PX, podMethod: POD_THRESH_METHOD,
            sensitivity: POS_SENSITIVITY, fixedThresholds: FIXED_POS_THRESHOLDS,
+           morphologyPrimary: MORPHOLOGY_PRIMARY, morphologyRules: MORPHOLOGY_RULES,
            minRingPosFraction: MIN_RING_POS_FRACTION, compartmentMode: COMPARTMENT_MODE,
            actubSupportExpandUm: ACTUB_SUPPORT_EXPAND_UM,
            actubMinSupportFraction: ACTUB_MIN_SUPPORT_FRACTION,

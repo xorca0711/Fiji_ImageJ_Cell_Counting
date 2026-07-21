@@ -55,13 +55,33 @@ survive filename parsing.
 Marker roles the pipeline understands:
 
 - **nuclear** (DAPI) — segmentation channel.
-- **cyto** (KRT5, Pro-SPC, CD4, CD8) — measured in a perinuclear ring.
-- **membrane** (AGER, PDPN) — measured in the ring; also interpretable as area.
+- **cyto** (KRT5, Pro-SPC, CC10, tdTomato) — measured in a perinuclear ring.
+- **membrane** (AGER, PDPN, T1A, mRAGE, CD4, CD8) — measured in a local
+  membrane-support ring.
 - **nuc_marker** (p63, Sox2) — measured inside the nucleus.
 - **nuc_ratio** (YAP) — nucleus vs. a true cytoplasmic ring → nuclear:cytoplasmic
   ratio (needs a single Z-plane; see caveats).
 - **apical_cilia** (acetylated alpha-tubulin) — thresholded apical-cilia
   patches plus an explicitly approximate nucleus-proximity association.
+
+See [`MARKER_MORPHOLOGY_GUIDE.md`](MARKER_MORPHOLOGY_GUIDE.md) for the complete
+marker-by-marker measurement, compartment-gating, optical-sectioning, control,
+and QC rationale.
+
+### Morphology-first call authority
+
+The final marker call has three states: positive, negative, or indeterminate.
+An intensity cutoff first defines candidate positive pixels. A final positive
+then requires the marker-specific minimum spatial coverage, connected pattern,
+localization/enrichment rule, unique ownership where applicable, and anatomical
+compartment. A final negative is assigned only when the marker is evaluable.
+Missing compartment, invalid YAP projection, empty support, or shared support is
+indeterminate rather than negative.
+
+`<marker>_pos` is the legacy mean-intensity audit result. Classifications and
+counts use `<marker>_final_call`; they do not use the raw mean-intensity result.
+Adaptive Otsu calls are explicitly exploratory. Use fixed, control-derived
+`IFQ_<MARKER>_THRESHOLD` values for confirmatory analysis.
 
 For panel E, marker morphology determines the analytical unit. CC10/SCGB1A1 is
 measured in perinuclear cytoplasm as a secretory-cell phenotype, tdTomato is
@@ -234,21 +254,22 @@ groups are compared; the example values above are not validated cutoffs.
 | `POD_MIN_AREA_UM2` | minimum particle size to count as a KRT5⁺ pod |
 | `POD_THRESH_METHOD` | auto-threshold method for the pod mask (`Otsu`, `Li`, …) |
 | `POS_SENSITIVITY` | per-marker multiplier on the auto threshold (`>1` stricter, `<1` more permissive) |
+| `IFQ_MORPHOLOGY_PRIMARY` | `true` by default; makes the three-state morphology call authoritative |
+| `IFQ_<MARKER>_THRESHOLD` | fixed control-derived candidate-pixel cutoff for a marker |
+| `IFQ_<MARKER>_MIN_POSITIVE_FRACTION` | minimum fraction of the role-specific support above cutoff |
+| `IFQ_<MARKER>_MIN_LARGEST_COMPONENT_SHARE` | minimum connectedness of positive support |
 | `IFQ_ACTUB_SUPPORT_EXPAND_UM` | radius beyond each nucleus used for AcTub proximity association |
 | `IFQ_ACTUB_MIN_SUPPORT_FRACTION` | minimum fraction of that support zone above the AcTub threshold |
 | `IFQ_ACTUB_MIN_PATCH_AREA_UM2` | minimum connected AcTub ciliary-patch area at 20x |
 | `TISSUE_THRESH_METHOD` / `TISSUE_MIN_AREA_UM2` | auto tissue detection when no manual ROI |
 
-**Positivity rule:** an object is positive for a marker if its mean raw
-intensity ≥ (Otsu threshold computed **within that tissue region**) ×
-`POS_SENSITIVITY[marker]`. Thresholds adapt per image/region; the *resolved*
-numeric cutoff is exported so you can audit it.
-
-AcTub is the exception to the mean-intensity rule: its exploratory per-nucleus
-call requires a minimum fraction of the larger support zone to exceed the
-regional threshold. The primary AcTub outputs are regional ciliary area and
-connected ciliary patches. CC10 positivity denotes protein phenotype; after
-injury it must not be used alone to infer club-cell lineage.
+**Positivity rule:** the resolved intensity cutoff is applied to pixels, and the
+marker-specific morphology gates authorize the final call. Object mean intensity
+is exported for audit but is not final-call authority. AcTub additionally
+requires an airway ROI for a per-cell interpretation; its primary 20x outputs
+remain regional ciliary area and connected patches. CC10 positivity denotes
+protein phenotype and must not be used alone to infer club-cell lineage after
+injury.
 
 ---
 
@@ -265,6 +286,8 @@ OUTPUT_DIR/
     ├── <stem>__params.json             # per-image parameters, calibration, channel map, thresholds
     ├── <stem>__<region>__QC.png        # QC overlay: tissue (white), nuclei (cyan), KRT5⁺ (magenta), pods (yellow)
     ├── <stem>__<region>__nuclei_mask.tif  # 16-bit label mask of nuclei
+    ├── <stem>__<region>__<marker>_morphology_positive_nuclei_mask.tif
+    ├── <stem>__<region>__<marker>_indeterminate_nuclei_mask.tif
     ├── <stem>__KRT5_pod_mask.tif       # binary pod mask (255 = KRT5⁺ pod)
     ├── <stem>__tdTOM_reporter_positive_mask.tif
     └── <stem>__AcTub_ciliary_mask.tif  # thresholded ciliary patches
@@ -282,13 +305,20 @@ biological marker name is used.
 
 - `mouse_id, section_id, genotype, condition, panel, region` — identifiers.
 - `region_area_um2, n_nuclei` — denominators.
-- `<marker>_pos_count`, `<marker>_density_per_mm2`, `<marker>_pos_threshold`.
+- `<marker>_pos_count`, `<marker>_density_per_mm2` — morphology-authoritative
+  positives; `<marker>_raw_mean_pos_count` preserves the legacy intensity audit.
+- `<marker>_pos_threshold` and `<marker>_threshold_source` — resolved cutoff and
+  whether it was fixed or adaptive.
+- `<marker>_morphology_pos_count`, `<marker>_morphology_negative_count`,
+  `<marker>_indeterminate_count`, `<marker>_morphology_evaluable_count` — the
+  authoritative three-state decision summary.
 - `KRT5_pod_area_um2`, `KRT5_pod_area_frac`, `KRT5_n_pods`,
   `KRT5_mean_pod_area_um2`, `KRT5_pod_threshold` — **primary endpoint**.
 - `<marker>_positive_area_um2`, `<marker>_positive_area_frac`,
   `<marker>_n_components`, `<marker>_area_mode` — morphology-neutral regional
   fields; for panel E the modes are `reporter` (tdTomato) and `ciliary` (AcTub).
-- `class_<rule>_count` — double +/− populations (e.g. `class_KRT5+_AGER-_count`).
+- `class_<rule>_count`, `class_<rule>_evaluable_count`, and
+  `class_<rule>_indeterminate_count` — classifications consume only final calls.
 
 After `aggregate_to_mouse.py` you also get:
 
@@ -338,11 +368,10 @@ sections as repeated measures).
 - **Projection matters.** MAX projection is fine for pod **area**. For **YAP**
   (Scheme 2) a MAX projection corrupts the nuclear:cytoplasmic ratio — set
   `PROJECTION="single"` and use one representative plane.
-- **Auto thresholds are placeholders.** They adapt per image but you must
-  confirm positivity against QC overlays and freeze sensitivities before
-  reporting. The automatic cutoff comes from tissue pixels but is applied to
-  per-object ring/nuclear means; those distributions differ, so a sensitivity
-  of `1.00` is not inherently a biologically neutral cutoff.
+- **Auto thresholds are exploratory placeholders.** They adapt per image and
+  define candidate pixels for morphology gates. Confirm them against controls,
+  replace them with fixed marker cutoffs, and freeze every morphology parameter
+  before reporting confirmatory results.
 - **Ligand vs. receptor KO** and **viral load** — see §1.
 
 ---
