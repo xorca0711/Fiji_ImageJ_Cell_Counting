@@ -89,6 +89,7 @@ import loci.plugins.in.ImporterOptions
 import loci.formats.FormatTools
 import groovy.json.JsonOutput
 import java.awt.Color
+import java.awt.Font
 import java.awt.Rectangle
 import java.util.zip.ZipInputStream
 
@@ -110,6 +111,7 @@ def FILE_GLOB   = ~/(?i).*\.(czi|lif|nd2|oir|oib|oif|ics|tif|tiff)$/
 def RECURSIVE   = envOr("IFQ_RECURSIVE", "false").toBoolean()
 def INCLUDE_REGEX = envOr("IFQ_INCLUDE_REGEX", ".*")
 def MAX_IMAGES  = Integer.parseInt(envOr("IFQ_MAX_IMAGES", "0")) // 0 = all
+def TISSUE_MODE = envOr("IFQ_TISSUE_MODE", "auto").toLowerCase() // auto | whole_field
 
 // If present, a samplesheet.csv in INPUT_DIR overrides per-file metadata.
 // Columns: filename,mouse_id,section_id,genotype,condition,panel
@@ -199,19 +201,26 @@ def PANELS = [
 
   // 260719-CW Olympus OIR panels. Bio-Formats metadata confirms channel order
   // by emission bands: 470 (DAPI), 540 (488), 620 (tdTOM), 750 nm (647).
+  // The 4x stitched mapping file contains only the first three channels.
+  "M": [ label:"M_4x_CC10_tdTOM_mapping",
+    channels:[ [idx:1, marker:"DAPI",  role:"nuclear", qcColor:"blue"],
+               [idx:2, marker:"CC10",  role:"cyto",    qcColor:"green"],
+               [idx:3, marker:"tdTOM", role:"cyto",    qcColor:"red", areaMarker:true] ],
+    classify:[ ["tdTOM":true], ["CC10":true,"tdTOM":true] ] ],
+
   "E": [ label:"E_CC10_tdTOM_AcTub",
-    channels:[ [idx:1, marker:"DAPI",  role:"nuclear"],
-               [idx:2, marker:"CC10",  role:"cyto"],
-               [idx:3, marker:"tdTOM", role:"cyto", areaMarker:true],
-               [idx:4, marker:"AcTub", role:"cyto"] ],
+    channels:[ [idx:1, marker:"DAPI",  role:"nuclear", qcColor:"blue"],
+               [idx:2, marker:"CC10",  role:"cyto",    qcColor:"green"],
+               [idx:3, marker:"tdTOM", role:"cyto",    qcColor:"red", areaMarker:true],
+               [idx:4, marker:"AcTub", role:"cyto",    qcColor:"white"] ],
     classify:[ ["tdTOM":true], ["CC10":true,"tdTOM":true],
                ["AcTub":true,"tdTOM":true] ] ],
 
   "R": [ label:"R_T1A_tdTOM_mRAGE",
-    channels:[ [idx:1, marker:"DAPI",  role:"nuclear"],
-               [idx:2, marker:"T1A",   role:"membrane"],
-               [idx:3, marker:"tdTOM", role:"cyto", areaMarker:true],
-               [idx:4, marker:"mRAGE", role:"membrane"] ],
+    channels:[ [idx:1, marker:"DAPI",  role:"nuclear",  qcColor:"blue"],
+               [idx:2, marker:"T1A",   role:"membrane", qcColor:"green"],
+               [idx:3, marker:"tdTOM", role:"cyto",     qcColor:"red", areaMarker:true],
+               [idx:4, marker:"mRAGE", role:"membrane", qcColor:"white"] ],
     classify:[ ["tdTOM":true], ["T1A":true,"tdTOM":true],
                ["mRAGE":true,"tdTOM":true] ] ],
 
@@ -486,6 +495,10 @@ def resolveTissueRois(String imgPath, ImagePlus dapi, cfg) {
     rois.eachWithIndex { r, i -> named << [name: (r.getName() ?: ("region" + (i+1))), roi: r] }
     return [source: hit.name, regions: named]
   }
+  if (cfg.tissueMode == "whole_field") {
+    return [source: "whole_field", regions: [[name: "whole_field",
+             roi: new Roi(0, 0, dapi.getWidth(), dapi.getHeight())]]]
+  }
   // Auto tissue from DAPI
   def mask = buildThresholdMask(dapi, cfg.tissueBlur, cfg.tissueMethod)
   IJ.run(mask, "Options...", "iterations=2 count=1 do=Close")
@@ -522,7 +535,8 @@ def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
     def rois = rm.getRoisAsArray().collect { it }
     crop.changes = false; crop.close()
     // keep only nuclei whose centroid lies inside the region
-    return rois.findAll { region.contains((int)it.getBounds().getCenterX(), (int)it.getBounds().getCenterY()) }
+    def included = rois.findAll { region.contains((int)it.getBounds().getCenterX(), (int)it.getBounds().getCenterY()) }
+    return [included: included, rejected: []]
   } else {
     // classic watershed fallback
     def m = crop.duplicate()
@@ -532,10 +546,29 @@ def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
     IJ.run(m, "Watershed", "")
     m.setCalibration(dapi.getCalibration())
     m.setRoi(region)
+    // Keep rejected candidates for QC instead of silently dropping them.
+    // A candidate is the same Otsu/watershed particle used for counting; the
+    // only post-segmentation rejection rules are calibrated area and image edge.
+    def candidates = particlesToRois(m, 0.0d, false)
+    // Preserve ParticleAnalyzer's calibrated size/edge decision as the
+    // authoritative count. Diagnostics are derived afterward and cannot alter it.
     def rois = particlesToRois(m, cfg.minNucArea, true)
+    def roiKey = { r ->
+      def b = r.getBounds()
+      return b.x + ":" + b.y + ":" + b.width + ":" + b.height
+    }
+    def includedKeys = rois.collect { roiKey(it) } as Set
+    def rejected = candidates.findAll { !includedKeys.contains(roiKey(it)) }.collect { r ->
+      def b = r.getBounds()
+      double area = measureRoi(dapi, r).area
+      boolean edge = b.x <= 0 || b.y <= 0 || b.x + b.width >= dapi.getWidth() || b.y + b.height >= dapi.getHeight()
+      return [roi: r,
+              reason: (edge ? "image_edge" : (area < cfg.minNucArea ? "area_below_minimum" : "particle_filter")),
+              area_um2: area]
+    }
     m.close()
     crop.close()
-    return rois
+    return [included: rois, rejected: rejected]
   }
 }
 
@@ -618,10 +651,13 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     }
 
     // ---- Nuclei -> cells ----
-    def nuclei = segmentNuclei(dapi, region, cfg)
+    def segmentation = segmentNuclei(dapi, region, cfg)
+    def nuclei = segmentation.included
+    def rejectedNuclei = segmentation.rejected ?: []
     def posCount = [:].withDefault { 0 }
     def classCount = [:].withDefault { 0 }
-    def krt5PosRois = []; def allNucRois = []
+    def posRois = [:].withDefault { [] }
+    def allNucRois = []
 
     nuclei.eachWithIndex { nuc, ni ->
       allNucRois << nuc
@@ -656,8 +692,10 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
         boolean pos = val >= chThresh[m]
         calls[m] = pos
         row[m + "_pos"] = pos ? 1 : 0
-        if (pos) posCount[m] = posCount[m] + 1
-        if (m == "KRT5" && pos) krt5PosRois << cellRoi
+        if (pos) {
+          posCount[m] = posCount[m] + 1
+          posRois[m] << cellRoi
+        }
       }
       // classifications
       panelDef.classify.each { rule ->
@@ -670,7 +708,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     }
 
     // ---- QC overlay for this region ----
-    def qc = buildQcOverlay(markerImg, panelDef, region, allNucRois, krt5PosRois,
+    def qc = buildQcOverlay(markerImg, panelDef, region, allNucRois, rejectedNuclei, posRois,
                             (areaMasks.isEmpty()? null : areaMasks[areaMasks.keySet().iterator().next()]))
     def qcPath = imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__QC.png"
     IJ.saveAs(qc, "PNG", qcPath); qc.close()
@@ -680,7 +718,11 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                  mouse_id: meta.mouse_id, section_id: meta.section_id,
                  genotype: meta.genotype, condition: meta.condition,
                  region_area_um2: regionAreaUm2,
-                 n_nuclei: nuclei.size() ]
+                 n_nuclei: nuclei.size(),
+                 n_rejected_nucleus_candidates: rejectedNuclei.size(),
+                 n_rejected_below_min_area: rejectedNuclei.count { it.reason == "area_below_minimum" },
+                 n_rejected_at_image_edge: rejectedNuclei.count { it.reason == "image_edge" },
+                 n_rejected_by_particle_filter: rejectedNuclei.count { it.reason == "particle_filter" } ]
     panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
       srow[c.marker + "_pos_count"] = posCount[c.marker]
       srow[c.marker + "_density_per_mm2"] = (regionAreaUm2 > 0 ? posCount[c.marker] / (regionAreaUm2/1e6) : 0)
@@ -698,6 +740,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
 
     // save nuclei mask for the region
     saveLabelMask(dapi, allNucRois, imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__nuclei_mask.tif")
+    saveLabelMask(dapi, rejectedNuclei.collect { it.roi }, imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__rejected_nuclei_mask.tif")
   }
 
   // save pod masks
@@ -717,7 +760,9 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     ring_expand_um: cfg.ringExpandUm, min_nucleus_area_um2: cfg.minNucArea,
     pod_min_area_um2: cfg.podMinArea, pod_blur_sigma_px: cfg.podBlur, pod_thresh_method: cfg.podMethod,
     pos_sensitivity: cfg.sensitivity, black_background: cfg.blackBackground,
-    tissue_roi_source: tissue.source, tissue_thresh_method: cfg.tissueMethod,
+    tissue_mode: cfg.tissueMode, tissue_roi_source: tissue.source,
+    tissue_thresh_method: cfg.tissueMethod,
+    rejected_nucleus_rules: [minimum_area_um2: cfg.minNucArea, exclude_image_edge: true],
     channel_map: panelDef.channels
   ]
   new File(imgOut, outputKey + "__params.json").text = JsonOutput.prettyPrint(JsonOutput.toJson(params))
@@ -736,30 +781,82 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
 //  6. OUTPUT HELPERS
 // ============================================================================
 
-def buildQcOverlay(markerImg, panelDef, Roi region, nucRois, krt5PosRois, podMask) {
-  // background = KRT5 channel (grayscale) if present, else DAPI
-  def bgKey = markerImg.containsKey("KRT5") ? "KRT5" : markerImg.keySet().iterator().next()
-  def bg = markerImg[bgKey].duplicate()
-  bg.getProcessor().resetMinAndMax()
-  def rgb = new ImagePlus(bg.getTitle(), bg.getProcessor().convertToRGB())
-  def ov = new Overlay()
-  def rReg = (Roi) region.clone(); rReg.setStrokeColor(Color.WHITE); ov.add(rReg)
-  nucRois.each { r -> def rr = (Roi) r.clone(); rr.setStrokeColor(new Color(0,180,255)); ov.add(rr) }   // cyan nuclei
-  krt5PosRois.each { r -> def rr = (Roi) r.clone(); rr.setStrokeColor(Color.MAGENTA); ov.add(rr) }       // KRT5+ cells
-  if (podMask != null) {                                                                                 // yellow pod outline
-    def pm = podMask.duplicate(); pm.setRoi(region)
-    particlesToRois(pm, 0.0d, false).each { r ->
-      def rr = (Roi) r.clone(); rr.setStrokeColor(Color.YELLOW); ov.add(rr)
+def markerOutlineColor(String marker) {
+  switch (marker) {
+    case "T1A": case "CC10": return new Color(0, 255, 0)
+    case "tdTOM": return new Color(255, 40, 40)
+    case "mRAGE": case "AcTub": return Color.WHITE
+    case "KRT5": return Color.MAGENTA
+    default: return new Color(255, 180, 0)
+  }
+}
+
+// Additively merge display-normalized channels into a headless-safe RGB image.
+// For panel R: DAPI=blue, T1A=green, tdTOM=red, mRAGE=white.
+def buildQcComposite(markerImg, panelDef) {
+  def first = markerImg.values().iterator().next()
+  int w = first.getWidth(), h = first.getHeight()
+  def layers = panelDef.channels.collect { c ->
+    def ip = markerImg[c.marker].getProcessor().duplicate()
+    ip.resetMinAndMax()
+    return [color: (c.qcColor ?: "white"), ip: ip.convertToByte(true)]
+  }
+  def out = new ColorProcessor(w, h)
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      int rr = 0, gg = 0, bb = 0
+      layers.each { layer ->
+        int v = layer.ip.get(x, y)
+        switch (layer.color) {
+          case "red": rr = Math.max(rr, v); break
+          case "green": gg = Math.max(gg, v); break
+          case "blue": bb = Math.max(bb, v); break
+          default:
+            rr = Math.max(rr, v); gg = Math.max(gg, v); bb = Math.max(bb, v)
+        }
+      }
+      out.set(x, y, (rr << 16) | (gg << 8) | bb)
     }
+  }
+  return new ImagePlus("four_channel_QC", out)
+}
+
+def buildQcOverlay(markerImg, panelDef, Roi region, nucRois, rejectedNuclei, posRois, podMask) {
+  def rgb = buildQcComposite(markerImg, panelDef)
+  ImageProcessor cp = rgb.getProcessor()
+
+  // Yellow is the continuous area-marker mask (tdTOM in panels E/M/R).
+  if (podMask != null) {
+    def pm = podMask.duplicate(); pm.setRoi(region)
+    cp.setLineWidth(1); cp.setColor(Color.YELLOW)
+    particlesToRois(pm, 0.0d, false).each { it.drawPixels(cp) }
     pm.close()
   }
-  // ImagePlus.flatten() constructs an ImageCanvas and fails in headless mode.
-  ImageProcessor cp = rgb.getProcessor()
-  ov.toArray().each { r ->
-    cp.setColor(r.getStrokeColor() ?: Color.WHITE)
-    r.drawPixels(cp)
+
+  // Orange is analysis-region membership; it is never an exclusion symbol.
+  cp.setLineWidth(2); cp.setColor(new Color(255, 150, 0)); region.drawPixels(cp)
+
+  // Violet candidates were found by the DAPI Otsu/watershed mask but rejected
+  // by minimum calibrated area or image-edge rules.
+  cp.setLineWidth(2); cp.setColor(new Color(220, 0, 255))
+  rejectedNuclei.each { it.roi.drawPixels(cp) }
+
+  // Cyan nuclei are the objects included in the cell table and summary count.
+  cp.setLineWidth(1); cp.setColor(new Color(0, 220, 255))
+  nucRois.each { it.drawPixels(cp) }
+
+  // Positive perinuclear measurement rings use their acquisition colors.
+  panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
+    cp.setLineWidth(c.marker == "mRAGE" ? 3 : 2)
+    cp.setColor(markerOutlineColor(c.marker))
+    (posRois[c.marker] ?: []).each { it.drawPixels(cp) }
   }
-  rgb.setProcessor(cp)
+
+  // Burn a compact legend into the exported PNG so colors remain auditable.
+  cp.setColor(Color.BLACK); cp.setRoi(0, 0, Math.min(cp.getWidth(), 1190), 64); cp.fill()
+  cp.resetRoi(); cp.setFont(new Font("SansSerif", Font.BOLD, 16)); cp.setColor(Color.WHITE)
+  cp.drawString("RAW: DAPI blue | T1A green | tdTOM red | mRAGE white", 10, 22)
+  cp.drawString("OUTLINES: ROI orange | counted nucleus cyan | rejected DAPI violet | positive rings use marker color", 10, 48)
   return rgb
 }
 
@@ -794,20 +891,23 @@ def writeCsv(rows, String path) {
 //  7. SAMPLESHEET / METADATA
 // ============================================================================
 
-def parseMeta(String fname, sheet, defaultPanel) {
+def parseMeta(String fname, sheet, defaultPanel, String sourceContext = "") {
   // sheet: map filename -> [mouse_id, section_id, genotype, condition, panel]
   if (sheet != null && sheet.containsKey(fname)) return sheet[fname]
   // fallback: try token convention mouseID_condition_panel_section.ext
   def stem = fname.replaceFirst(/\.[^.]+$/, "")
-  // 260719-CW convention, e.g. "... 260105 M5 pr8_bleo ...
-  // CC10_488 ..._A01_G001_0001.oir". Infer the two staining panels so a
-  // recursive mixed-panel run does not need 151 samplesheet rows.
-  def cw = (stem =~ /(?i).*?\b(\d{6})\s+([MF]\d+)\s+(pr8_(?:bleo|PBS))\b.*?_(A\d+_G\d+_\d+)$/)
-  if (cw.matches()) {
-    def inferredPanel = stem.toLowerCase().contains("cc10_488") ? "E" :
-                        (stem.toLowerCase().contains("t1a_488") ? "R" : defaultPanel)
+  // 260719-CW convention. Use the parent path as context because stitched
+  // overview names (for example Stitch_A01_G001.oir) omit mouse/stain details.
+  def identityText = stem + " " + sourceContext
+  def cw = (identityText =~ /(?i).*?\b(\d{6})\s+([MF]\d+)\s+(pr8_(?:bleo|PBS))\b/)
+  def section = (stem =~ /(?i).*(A\d+_G\d+(?:_\d+)?)$/)
+  if (cw.find() && section.matches()) {
+    def lower = identityText.toLowerCase()
+    def inferredPanel = lower.contains("4x mapping") && lower.contains("cc10_488") ? "M" :
+                        lower.contains("cc10_488") ? "E" :
+                        (lower.contains("t1a_488") ? "R" : defaultPanel)
     return [ mouse_id: cw.group(1) + "_" + cw.group(2),
-             section_id: cw.group(4), genotype: "krt5-creERT2;tdTOM",
+             section_id: section.group(1), genotype: "krt5-creERT2;tdTOM",
              condition: cw.group(3).toLowerCase(), panel: inferredPanel ]
   }
   def toks = stem.split("_")
@@ -855,7 +955,8 @@ def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles:
            ringExpandUm: RING_EXPAND_UM, minNucArea: MIN_NUCLEUS_AREA_UM2,
            podMinArea: POD_MIN_AREA_UM2, podBlur: POD_BLUR_SIGMA_PX, podMethod: POD_THRESH_METHOD,
            sensitivity: POS_SENSITIVITY,
-           tissueBlur: TISSUE_BLUR_SIGMA_PX, tissueMethod: TISSUE_THRESH_METHOD, tissueMinArea: TISSUE_MIN_AREA_UM2 ]
+           tissueMode: TISSUE_MODE, tissueBlur: TISSUE_BLUR_SIGMA_PX,
+           tissueMethod: TISSUE_THRESH_METHOD, tissueMinArea: TISSUE_MIN_AREA_UM2 ]
 
 def versions = captureVersions()
 IJ.log("ImageJ " + versions.imagej_version + " | Bio-Formats " + versions.bioformats_version)
@@ -890,7 +991,7 @@ def manifest = [ run_timestamp: versions.timestamp, versions: versions, config: 
 def basenameCounts = files.countBy { it.name }
 
 files.each { f ->
-  def m = parseMeta(f.name, sheet, PANEL)
+  def m = parseMeta(f.name, sheet, PANEL, f.parentFile.absolutePath)
   def panelKey = (m.panel && PANELS.containsKey(m.panel)) ? m.panel : PANEL
   def panelDef = PANELS[panelKey]
   // Keep Windows paths manageable. The source acquisition name is preserved

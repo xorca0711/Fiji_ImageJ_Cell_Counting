@@ -145,19 +145,25 @@ Paths and test selection can be supplied without editing the Groovy file:
 ```powershell
 $env:IFQ_INPUT_DIR = 'G:\내 드라이브\260719-CW'
 $env:IFQ_OUTPUT_DIR = "$PWD\test_runs\260719-CW_CC10_smoke"
-$env:IFQ_PANEL = 'E'                 # E=CC10/tdTOM/AcTub; R=T1A/tdTOM/mRAGE
+$env:IFQ_PANEL = 'E'                 # M=4x DAPI/CC10/tdTOM; E/R=20x panels
 $env:IFQ_RECURSIVE = 'true'
 $env:IFQ_INCLUDE_REGEX = '.*CC10_488.*20x 2k_Cycle.*G001_0001\.oir$'
 $env:IFQ_MAX_IMAGES = '1'            # 0 means all matching files
+$env:IFQ_TISSUE_MODE = 'whole_field' # count disconnected DAPI objects across the field
 ```
 
 The 260719-CW filename convention is recognized automatically: mouse/date,
-condition, section, and panel E/R are inferred. A `samplesheet.csv` remains
+condition, section, and panel M/E/R are inferred. A `samplesheet.csv` remains
 authoritative when supplied. Recursive runs add a stable suffix for duplicate
 basenames so `Cycle` and `Cycle_01` data cannot overwrite each other.
 Output folders and files use the concise pattern
 `<mouse>_<condition>_<panel>_<section>`; the complete acquisition filename is
 retained in `run_manifest.json` and each `__params.json` file.
+
+Panel-R QC images display DAPI/T1A/tdTOM/mRAGE as blue/green/red/white.
+Orange marks the analysis ROI, cyan marks counted nuclei, violet marks DAPI
+particle candidates rejected by the minimum-area or image-edge rule, and
+positive measurement rings use the corresponding marker color.
 
 ---
 
