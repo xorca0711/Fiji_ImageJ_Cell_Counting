@@ -150,6 +150,11 @@ $env:IFQ_RECURSIVE = 'true'
 $env:IFQ_INCLUDE_REGEX = '.*CC10_488.*20x 2k_Cycle.*G001_0001\.oir$'
 $env:IFQ_MAX_IMAGES = '1'            # 0 means all matching files
 $env:IFQ_TISSUE_MODE = 'whole_field' # count disconnected DAPI objects across the field
+$env:IFQ_COMPARTMENT_MODE = 'required' # final run: require alveoli/airway ROI names
+$env:IFQ_T1A_THRESHOLD = '887.2'        # example only; freeze from controls
+$env:IFQ_MRAGE_THRESHOLD = '503.1'      # example only; freeze from controls
+$env:IFQ_T1A_MIN_RING_FRACTION = '0.30' # pilot value; validate before freezing
+$env:IFQ_MRAGE_MIN_RING_FRACTION = '0.30'
 ```
 
 The 260719-CW filename convention is recognized automatically: mouse/date,
@@ -161,9 +166,21 @@ Output folders and files use the concise pattern
 retained in `run_manifest.json` and each `__params.json` file.
 
 Panel-R QC images display DAPI/T1A/tdTOM/mRAGE as blue/green/red/white.
-Orange marks the analysis ROI, cyan marks counted nuclei, violet marks DAPI
-particle candidates rejected by the minimum-area or image-edge rule, and
-positive measurement rings use the corresponding marker color.
+Cyan is the only per-object outline and marks counted DAPI nuclei. Orange marks
+the analysis ROI; green/red/white boundaries mark continuous fluorescence
+regions for T1A/tdTOM/mRAGE. Rejected DAPI candidates remain available in the
+separate `__rejected_nuclei_mask.tif` audit image.
+
+For morphology-aware final calls, draw compartment ROIs before looking at the
+target-channel quantification and name each ROI `alveoli`, `airway`, or
+`ambiguous` (suffixes such as `alveoli_01` are allowed). Put them in the usual
+per-image ROI ZIP and set `IFQ_COMPARTMENT_MODE=required`. For T1A and mRAGE the
+pipeline then exports three distinct decisions: intensity above a predeclared
+cutoff, fraction of the perinuclear ring above that cutoff, and compartment
+consistency. `<marker>_true_pos` is assigned only when all three pass; it is
+left blank when morphology is unassigned. Thresholds and minimum ring fractions
+must be selected from negative/positive controls and frozen before the study
+groups are compared; the example values above are not validated cutoffs.
 
 ---
 

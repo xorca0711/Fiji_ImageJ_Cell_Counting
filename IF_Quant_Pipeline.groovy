@@ -112,6 +112,17 @@ def RECURSIVE   = envOr("IFQ_RECURSIVE", "false").toBoolean()
 def INCLUDE_REGEX = envOr("IFQ_INCLUDE_REGEX", ".*")
 def MAX_IMAGES  = Integer.parseInt(envOr("IFQ_MAX_IMAGES", "0")) // 0 = all
 def TISSUE_MODE = envOr("IFQ_TISSUE_MODE", "auto").toLowerCase() // auto | whole_field
+def COMPARTMENT_MODE = envOr("IFQ_COMPARTMENT_MODE", "optional").toLowerCase() // optional | required
+def FIXED_POS_THRESHOLDS = [:]
+[[marker:"T1A", env:"IFQ_T1A_THRESHOLD"],
+ [marker:"mRAGE", env:"IFQ_MRAGE_THRESHOLD"]].each { spec ->
+  def rawValue = System.getenv(spec.env)
+  if (rawValue != null && !rawValue.trim().isEmpty()) FIXED_POS_THRESHOLDS[spec.marker] = Double.parseDouble(rawValue.trim())
+}
+def MIN_RING_POS_FRACTION = [
+  "T1A": Double.parseDouble(envOr("IFQ_T1A_MIN_RING_FRACTION", "0.30")),
+  "mRAGE": Double.parseDouble(envOr("IFQ_MRAGE_MIN_RING_FRACTION", "0.30"))
+]
 
 // If present, a samplesheet.csv in INPUT_DIR overrides per-file metadata.
 // Columns: filename,mouse_id,section_id,genotype,condition,panel
@@ -454,6 +465,31 @@ def positiveAreaInRoi(ImagePlus maskImp, Roi roi) {
   return pos * cal.pixelWidth * cal.pixelHeight
 }
 
+// Fraction of pixels in an object/ring whose raw intensity reaches threshold.
+// This separates a spatially supported membrane pattern from a bright speck
+// that happens to raise the object's mean.
+def fractionAboveThreshold(ImagePlus imp, Roi roi, double threshold) {
+  ImageProcessor ip = imp.getProcessor()
+  long total = 0L, positive = 0L
+  eachRoiPixel(roi) { x, y ->
+    if (x >= 0 && y >= 0 && x < ip.getWidth() && y < ip.getHeight()) {
+      total++
+      if (ip.getPixelValue(x, y) >= threshold) positive++
+    }
+  }
+  return total > 0 ? positive / (double)total : 0.0d
+}
+
+def buildMaskAtThreshold(ImagePlus ch, double threshold) {
+  ImagePlus dup = ch.duplicate()
+  double upper = ch.getBitDepth() == 8 ? 255.0d : (ch.getBitDepth() == 16 ? 65535.0d : Double.MAX_VALUE)
+  dup.getProcessor().setThreshold(threshold, upper, ImageProcessor.NO_LUT_UPDATE)
+  IJ.run(dup, "Convert to Mask", "")
+  dup.setCalibration(ch.getCalibration())
+  dup.setProperty("thresholdValue", threshold)
+  return dup
+}
+
 // Build a binary mask ImagePlus (255 = signal) from a channel by threshold.
 // The numeric lower threshold is stashed as a property for provenance export.
 // Requires Prefs.blackBackground=true (set in main) so foreground = 255.
@@ -621,15 +657,32 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
   tissue.regions.eachWithIndex { reg, ri ->
     def region = reg.roi
     def regName = reg.name
+    def regionLower = regName.toLowerCase()
+    def compartment = regionLower.contains("alveol") ? "alveolar" :
+                      ((regionLower.contains("airway") || regionLower.contains("bronch")) ? "airway" :
+                       (regionLower.contains("ambig") ? "ambiguous" : "unassigned"))
+    if (cfg.compartmentMode == "required" && compartment == "unassigned") {
+      throw new IllegalArgumentException("Morphology classification required: name each manual ROI alveoli, airway, or ambiguous; found '" + regName + "'")
+    }
     def regStat = measureRoi(dapi, region)   // area of region
     double regionAreaUm2 = regStat.area
 
     // per-marker channel thresholds inside THIS region (adaptive)
     def chThresh = [:]
+    def chThreshSource = [:]
     panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
-      double t = autoThresholdInRoi(markerImg[c.marker], region, "Otsu")
-      double sens = (cfg.sensitivity[c.marker] ?: 1.0)
+      boolean fixed = cfg.fixedThresholds.containsKey(c.marker)
+      double t = fixed ? (double)cfg.fixedThresholds[c.marker] : autoThresholdInRoi(markerImg[c.marker], region, "Otsu")
+      double sens = fixed ? 1.0d : (cfg.sensitivity[c.marker] ?: 1.0)
       chThresh[c.marker] = t * sens
+      chThreshSource[c.marker] = fixed ? "fixed_predeclared" : "adaptive_otsu_exploratory"
+    }
+
+    // Region boundaries for each fluorescence channel; these replace the
+    // former per-cell marker-positive circles in the QC overlay.
+    def qcMasks = [:]
+    panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
+      qcMasks[c.marker] = buildMaskAtThreshold(markerImg[c.marker], chThresh[c.marker])
     }
 
     // ---- Pod area (areaMarkers, e.g. KRT5) ----
@@ -655,14 +708,15 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     def nuclei = segmentation.included
     def rejectedNuclei = segmentation.rejected ?: []
     def posCount = [:].withDefault { 0 }
+    def truePosCount = [:].withDefault { 0 }
     def classCount = [:].withDefault { 0 }
-    def posRois = [:].withDefault { [] }
     def allNucRois = []
 
     nuclei.eachWithIndex { nuc, ni ->
       allNucRois << nuc
       def cellRoi = RoiEnlarger.enlarge(nuc, (int)Math.round(cfg.ringExpandUm / cal.pixelWidth))
-      def row = [ image: sourceStem, panel: panelKey, region: regName, cell_id: (ni + 1) ]
+      def row = [ image: sourceStem, panel: panelKey, region: regName,
+                  compartment: compartment, cell_id: (ni + 1) ]
       row.mouse_id = meta.mouse_id; row.section_id = meta.section_id
       row.genotype = meta.genotype; row.condition = meta.condition
       def cs = measureRoi(dapi, nuc)
@@ -672,6 +726,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
         def m = c.marker
         def img = markerImg[m]
+        def spatialRoi = nuc
         double val, nucVal = 0, ringVal = 0
         if (c.role == "nuc_marker") {
           val = measureRoi(img, nuc).mean
@@ -680,21 +735,38 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
           // true cytoplasmic ring = (enlarged cell) MINUS (nucleus)
           def ring = ringOnly(nuc, cellRoi)
           double cytoVal = (ring != null) ? measureRoi(img, ring).mean : measureRoi(img, cellRoi).mean
+          spatialRoi = (ring != null) ? ring : cellRoi
           val = nucVal   // positivity uses nuclear signal for YAP
           row[m + "_nuc_mean"] = nucVal
           row[m + "_cyto_mean"] = cytoVal
           row[m + "_nuc_cyto_ratio"] = (cytoVal > 0 ? nucVal/cytoVal : 0)
         } else { // cyto / membrane: measure the perinuclear ring, not nucleus + ring
           def ring = ringOnly(nuc, cellRoi)
-          val = (ring != null) ? measureRoi(img, ring).mean : measureRoi(img, cellRoi).mean
+          spatialRoi = (ring != null) ? ring : cellRoi
+          val = measureRoi(img, spatialRoi).mean
         }
         row[m + "_mean"] = val
-        boolean pos = val >= chThresh[m]
-        calls[m] = pos
-        row[m + "_pos"] = pos ? 1 : 0
-        if (pos) {
+        boolean intensityPos = val >= chThresh[m]
+        calls[m] = intensityPos
+        row[m + "_pos"] = intensityPos ? 1 : 0
+        row[m + "_threshold_source"] = chThreshSource[m]
+        if (intensityPos) {
           posCount[m] = posCount[m] + 1
-          posRois[m] << cellRoi
+        }
+        if (m == "T1A" || m == "mRAGE") {
+          double fraction = fractionAboveThreshold(img, spatialRoi, chThresh[m])
+          double requiredFraction = (double)(cfg.minRingPosFraction[m] ?: 0.30d)
+          boolean patternPos = fraction >= requiredFraction
+          def compartmentConsistent = compartment == "unassigned" ? "" :
+                                       (compartment == "alveolar" ? 1 : 0)
+          def truePos = compartmentConsistent == "" ? "" :
+                        (intensityPos && patternPos && compartmentConsistent == 1 ? 1 : 0)
+          row[m + "_ring_fraction_above_threshold"] = fraction
+          row[m + "_minimum_ring_fraction"] = requiredFraction
+          row[m + "_pattern_pos"] = patternPos ? 1 : 0
+          row[m + "_compartment_consistent"] = compartmentConsistent
+          row[m + "_true_pos"] = truePos
+          if (truePos == 1) truePosCount[m] = truePosCount[m] + 1
         }
       }
       // classifications
@@ -708,15 +780,14 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     }
 
     // ---- QC overlay for this region ----
-    def qc = buildQcOverlay(markerImg, panelDef, region, allNucRois, rejectedNuclei, posRois,
-                            (areaMasks.isEmpty()? null : areaMasks[areaMasks.keySet().iterator().next()]))
+    def qc = buildQcOverlay(markerImg, panelDef, region, allNucRois, qcMasks)
     def qcPath = imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__QC.png"
     IJ.saveAs(qc, "PNG", qcPath); qc.close()
 
     // ---- region summary row ----
     def srow = [ image: sourceStem, panel: panelKey, region: regName,
                  mouse_id: meta.mouse_id, section_id: meta.section_id,
-                 genotype: meta.genotype, condition: meta.condition,
+                 genotype: meta.genotype, condition: meta.condition, compartment: compartment,
                  region_area_um2: regionAreaUm2,
                  n_nuclei: nuclei.size(),
                  n_rejected_nucleus_candidates: rejectedNuclei.size(),
@@ -727,6 +798,10 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       srow[c.marker + "_pos_count"] = posCount[c.marker]
       srow[c.marker + "_density_per_mm2"] = (regionAreaUm2 > 0 ? posCount[c.marker] / (regionAreaUm2/1e6) : 0)
       srow[c.marker + "_pos_threshold"] = chThresh[c.marker]   // resolved raw-intensity cutoff
+      srow[c.marker + "_threshold_source"] = chThreshSource[c.marker]
+      if (c.marker == "T1A" || c.marker == "mRAGE") {
+        srow[c.marker + "_true_pos_count"] = compartment == "unassigned" ? "" : truePosCount[c.marker]
+      }
     }
     podStats.each { m, ps ->
       srow[m + "_pod_area_um2"] = ps.area_um2
@@ -737,6 +812,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     }
     classCount.each { k, v -> srow["class_" + k + "_count"] = v }
     summaryRows << srow
+    qcMasks.each { k, v -> v.close() }
 
     // save nuclei mask for the region
     saveLabelMask(dapi, allNucRois, imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__nuclei_mask.tif")
@@ -760,6 +836,9 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     ring_expand_um: cfg.ringExpandUm, min_nucleus_area_um2: cfg.minNucArea,
     pod_min_area_um2: cfg.podMinArea, pod_blur_sigma_px: cfg.podBlur, pod_thresh_method: cfg.podMethod,
     pos_sensitivity: cfg.sensitivity, black_background: cfg.blackBackground,
+    fixed_pos_thresholds: cfg.fixedThresholds,
+    compartment_mode: cfg.compartmentMode,
+    minimum_ring_positive_fraction: cfg.minRingPosFraction,
     tissue_mode: cfg.tissueMode, tissue_roi_source: tissue.source,
     tissue_thresh_method: cfg.tissueMethod,
     rejected_nucleus_rules: [minimum_area_um2: cfg.minNucArea, exclude_image_edge: true],
@@ -821,42 +900,37 @@ def buildQcComposite(markerImg, panelDef) {
   return new ImagePlus("four_channel_QC", out)
 }
 
-def buildQcOverlay(markerImg, panelDef, Roi region, nucRois, rejectedNuclei, posRois, podMask) {
+def buildQcOverlay(markerImg, panelDef, Roi region, nucRois, channelMasks) {
   def rgb = buildQcComposite(markerImg, panelDef)
   ImageProcessor cp = rgb.getProcessor()
 
-  // Yellow is the continuous area-marker mask (tdTOM in panels E/M/R).
-  if (podMask != null) {
-    def pm = podMask.duplicate(); pm.setRoi(region)
-    cp.setLineWidth(1); cp.setColor(Color.YELLOW)
-    particlesToRois(pm, 0.0d, false).each { it.drawPixels(cp) }
+  // Continuous fluorescence-region boundaries replace the former per-cell
+  // marker circles. Color follows acquisition: green/red/white.
+  panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
+    def pm = channelMasks[c.marker].duplicate()
+    pm.getProcessor().setThreshold(128, 255, ImageProcessor.NO_LUT_UPDATE)
+    def signalRoi = ThresholdToSelection.run(pm)
+    cp.setLineWidth(c.marker == "mRAGE" ? 2 : 1)
+    cp.setColor(markerOutlineColor(c.marker))
+    if (signalRoi != null) {
+      def clipped = new ShapeRoi(signalRoi).and(new ShapeRoi(region))
+      clipped.drawPixels(cp)
+    }
     pm.close()
   }
 
   // Orange is analysis-region membership; it is never an exclusion symbol.
   cp.setLineWidth(2); cp.setColor(new Color(255, 150, 0)); region.drawPixels(cp)
 
-  // Violet candidates were found by the DAPI Otsu/watershed mask but rejected
-  // by minimum calibrated area or image-edge rules.
-  cp.setLineWidth(2); cp.setColor(new Color(220, 0, 255))
-  rejectedNuclei.each { it.roi.drawPixels(cp) }
-
-  // Cyan nuclei are the objects included in the cell table and summary count.
-  cp.setLineWidth(1); cp.setColor(new Color(0, 220, 255))
+  // Cyan is the only per-object circle: nuclei included in DAPI-based counts.
+  cp.setLineWidth(2); cp.setColor(new Color(0, 220, 255))
   nucRois.each { it.drawPixels(cp) }
-
-  // Positive perinuclear measurement rings use their acquisition colors.
-  panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
-    cp.setLineWidth(c.marker == "mRAGE" ? 3 : 2)
-    cp.setColor(markerOutlineColor(c.marker))
-    (posRois[c.marker] ?: []).each { it.drawPixels(cp) }
-  }
 
   // Burn a compact legend into the exported PNG so colors remain auditable.
   cp.setColor(Color.BLACK); cp.setRoi(0, 0, Math.min(cp.getWidth(), 1190), 64); cp.fill()
   cp.resetRoi(); cp.setFont(new Font("SansSerif", Font.BOLD, 16)); cp.setColor(Color.WHITE)
   cp.drawString("RAW: DAPI blue | T1A green | tdTOM red | mRAGE white", 10, 22)
-  cp.drawString("OUTLINES: ROI orange | counted nucleus cyan | rejected DAPI violet | positive rings use marker color", 10, 48)
+  cp.drawString("OUTLINES: counted DAPI nuclei cyan | ROI orange | marker regions green/red/white", 10, 48)
   return rgb
 }
 
@@ -954,7 +1028,8 @@ def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles:
            projection: PROJECTION, singlePlane: SINGLE_PLANE,
            ringExpandUm: RING_EXPAND_UM, minNucArea: MIN_NUCLEUS_AREA_UM2,
            podMinArea: POD_MIN_AREA_UM2, podBlur: POD_BLUR_SIGMA_PX, podMethod: POD_THRESH_METHOD,
-           sensitivity: POS_SENSITIVITY,
+           sensitivity: POS_SENSITIVITY, fixedThresholds: FIXED_POS_THRESHOLDS,
+           minRingPosFraction: MIN_RING_POS_FRACTION, compartmentMode: COMPARTMENT_MODE,
            tissueMode: TISSUE_MODE, tissueBlur: TISSUE_BLUR_SIGMA_PX,
            tissueMethod: TISSUE_THRESH_METHOD, tissueMinArea: TISSUE_MIN_AREA_UM2 ]
 
