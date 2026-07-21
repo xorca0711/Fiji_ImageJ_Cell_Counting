@@ -10,6 +10,9 @@ a future mechanistic panel (p63/YAP).
 - **`aggregate_to_mouse.py`** — rolls per-region results up to the **mouse**
   (biological replicate) level and produces a stats-ready group summary.
 - **`samplesheet_template.csv`** — per-image metadata template.
+- **[`WORKFLOW.md`](WORKFLOW.md)** — current end-to-end operational sequence.
+- **[`docs/`](docs/README.md)** — marker morphology and validated pilot results.
+- **[`legacy/`](legacy/README.md)** — non-authoritative historical archive.
 
 ---
 
@@ -64,9 +67,14 @@ Marker roles the pipeline understands:
 - **apical_cilia** (acetylated alpha-tubulin) — thresholded apical-cilia
   patches plus an explicitly approximate nucleus-proximity association.
 
-See [`MARKER_MORPHOLOGY_GUIDE.md`](MARKER_MORPHOLOGY_GUIDE.md) for the complete
+See [`docs/MARKER_MORPHOLOGY_GUIDE.md`](docs/MARKER_MORPHOLOGY_GUIDE.md) for the complete
 marker-by-marker measurement, compartment-gating, optical-sectioning, control,
 and QC rationale.
+
+The concise end-to-end operational sequence is in [`WORKFLOW.md`](WORKFLOW.md).
+Validated pilot results are indexed under [`docs/`](docs/README.md), while
+superseded scripts, figures, and local run outputs are described in
+[`legacy/`](legacy/README.md).
 
 ### Morphology-first call authority
 

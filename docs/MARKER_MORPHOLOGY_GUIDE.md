@@ -219,7 +219,8 @@ All calls and areas are exploratory because the pilot used image-specific Otsu
 thresholds. The mixed panel-E field was not forced to `airway`, so all AcTub
 per-cell calls are indeterminate. The inspected panel-R field was homogeneous
 alveolar parenchyma and used a provenance-recorded whole-field `alveolar`
-assignment. See `PILOT_G002_MORPHOLOGY_RESULTS.md` for full results.
+assignment. See [`PILOT_G002_MORPHOLOGY_RESULTS.md`](PILOT_G002_MORPHOLOGY_RESULTS.md)
+for full results.
 
 ## 8. QC and control acceptance
 
@@ -252,6 +253,9 @@ Before accepting a field, verify:
 
 ## 10. Related files
 
-- `IF_Quant_Pipeline.groovy`: implementation and parameter provenance.
-- `README.md`: installation, execution, outputs, and statistics.
-- `aggregate_to_mouse.py`: mouse-level aggregation after section QC.
+- [`../IF_Quant_Pipeline.groovy`](../IF_Quant_Pipeline.groovy): implementation
+  and parameter provenance.
+- [`../README.md`](../README.md): installation, execution, outputs, and
+  statistics.
+- [`../aggregate_to_mouse.py`](../aggregate_to_mouse.py): mouse-level
+  aggregation after section QC.

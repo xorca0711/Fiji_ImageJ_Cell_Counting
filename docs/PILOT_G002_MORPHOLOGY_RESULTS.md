@@ -4,7 +4,7 @@ Date: 2026-07-21
 
 This report records one original 20x field from each requested staining panel,
 processed with the morphology-first three-state hierarchy in
-`IF_Quant_Pipeline.groovy`.
+[`../IF_Quant_Pipeline.groovy`](../IF_Quant_Pipeline.groovy).
 
 These are technical pilot results, not study endpoints. All marker and area
 thresholds were image-specific Otsu thresholds, so every positive/negative result
@@ -14,7 +14,7 @@ is exploratory until thresholds are derived from controls and frozen.
 
 Input field: `A01_G002_0001.oir`, panel E, 20x, one optical section.
 
-Output folder: `test_runs/FinalPilot_CC10_AcTub_G002_morphology_primary_v2`
+Output folder: `test_runs/current/FinalPilot_CC10_AcTub_G002_morphology_primary_v2`
 
 The field contains mixed airway-like and parenchymal structures. It was not
 forced into a single airway compartment. This preserves AcTub cell calls as
@@ -52,7 +52,7 @@ ROI and control-derived cutoff are required for cell-associated interpretation.
 
 Input field: `A01_G002_0001.oir`, panel R, 20x, one optical section.
 
-Output folder: `test_runs/FinalPilot_T1A_mRAGE_G002_morphology_primary_v2`
+Output folder: `test_runs/current/FinalPilot_T1A_mRAGE_G002_morphology_primary_v2`
 
 Prior raw/QC review showed alveolar-parenchymal architecture without a conducting
 airway. The run therefore used an explicit, provenance-recorded whole-field
