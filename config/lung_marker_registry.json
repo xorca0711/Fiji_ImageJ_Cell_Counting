@@ -1,0 +1,559 @@
+{
+  "schema_version": "1.0.0",
+  "title": "Universal lung IF marker registry",
+  "scope": "Research-oriented marker metadata for lung lineage, repair, fibrosis, vascular, immune, and tumor-lineage imaging. It is not a diagnostic classifier.",
+  "source_note": "Structured from the user-supplied Lung_Cell_Lineages_Markers_Reference.pdf (7 pages) and the primary sources listed in docs/UNIVERSAL_MARKER_CONFIGURATION.md.",
+  "role_templates": {
+    "nuclear": "Segmentation channel only",
+    "nuc_marker": "Connected signal within the DAPI nucleus plus nuclear enrichment",
+    "nuc_ratio": "Nuclear signal relative to a cytoplasmic reference ring; normally single-plane",
+    "cyto": "Connected signal in a nucleus-associated cytoplasmic support ring",
+    "membrane": "Connected thin or circumferential signal in a local membrane-support ring",
+    "apical_cilia": "Apical ciliary patches and optional nucleus-proximity association",
+    "regional_area": "Thresholded regional structure area; no per-nucleus positive/negative call"
+  },
+  "research_profiles": {
+    "acute_injury_regeneration": {
+      "questions": [
+        "AT2 to transitional to AT1 repair trajectory",
+        "Airway-derived basal or secretory contribution",
+        "Resolution versus persistence of transitional states"
+      ],
+      "marker_sets": [
+        ["KRT8", "CLDN4", "SFTPC", "AGER"],
+        ["KRT5", "TP63", "SCGB1A1", "AcTub"],
+        ["IL1R1", "SFTPC", "KRT8", "PDPN"]
+      ],
+      "caveat": "KRT8 is broadly epithelial. A repair-state interpretation needs alveolar context and co-markers; time after injury is part of the phenotype."
+    },
+    "ipf_fibrosis": {
+      "questions": [
+        "Aberrant basaloid or transitional epithelial states",
+        "Loss or remodeling of AT1 and AT2 compartments",
+        "Pathogenic myofibroblast and matrix expansion"
+      ],
+      "marker_sets": [
+        ["KRT17", "KRT5", "TP63", "ITGB6"],
+        ["KRT8", "CLDN4", "SFTPC", "AGER"],
+        ["CTHRC1", "ACTA2", "COL1A1", "PDGFRA"]
+      ],
+      "caveat": "KRT17-positive/KRT5-negative or KRT8-high patterns are state descriptions, not stand-alone IPF diagnoses. Fibrotic geography and orthogonal pathology are required."
+    },
+    "lung_adenocarcinoma_lineage": {
+      "questions": [
+        "Pulmonary glandular lineage support",
+        "Tumor versus adjacent normal epithelial geography",
+        "Adenocarcinoma versus squamous-lineage marker pattern"
+      ],
+      "marker_sets": [
+        ["NKX2-1", "NAPSA", "EPCAM", "KRT7"],
+        ["NKX2-1", "NAPSA", "TP63", "KRT5"]
+      ],
+      "caveat": "The image pipeline quantifies marker patterns; it does not diagnose malignancy or determine tumor origin. TTF-1/NKX2-1 and Napsin A require histomorphology, controls, and clinical-pathology review."
+    }
+  },
+  "markers": {
+    "DAPI": {
+      "aliases": ["Hoechst"],
+      "default_role": "nuclear",
+      "default_measurement": "nuclear_segmentation",
+      "localization": "DNA-associated nuclear counterstain",
+      "lineages_or_states": ["all nucleated cells"],
+      "modalities": ["IF"]
+    },
+    "KRT5": {
+      "aliases": ["CK5", "Krt5"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_keratin",
+      "localization": "cytoplasmic intermediate filament",
+      "lineages_or_states": ["airway basal", "injury-induced basal pod"],
+      "candidate_compartments": ["airway", "alveolar", "fibrotic", "tumor"],
+      "research_contexts": ["acute_injury_regeneration", "ipf_fibrosis", "lung_adenocarcinoma_lineage"],
+      "interpretation_caveat": "Not specific to one lineage outside anatomical and co-marker context."
+    },
+    "TP63": {
+      "aliases": ["p63", "Trp63"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["airway basal", "aberrant basaloid", "squamous lineage"],
+      "candidate_compartments": ["airway", "fibrotic", "tumor"],
+      "interpretation_caveat": "Pan-p63 is not equivalent to delta-Np63/p40; record antibody specificity."
+    },
+    "KRT14": {
+      "aliases": ["CK14", "Krt14"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_keratin",
+      "localization": "cytoplasmic intermediate filament",
+      "lineages_or_states": ["activated or regenerating basal"]
+    },
+    "KRT15": {
+      "aliases": ["CK15", "Krt15"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_keratin",
+      "localization": "cytoplasmic intermediate filament",
+      "lineages_or_states": ["basal subset", "club subset"]
+    },
+    "NGFR": {
+      "aliases": ["CD271"],
+      "default_role": "membrane",
+      "default_measurement": "cell_surface_membrane_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["airway basal"],
+      "modalities": ["IF", "FACS"]
+    },
+    "ITGA6": {
+      "aliases": ["CD49f"],
+      "default_role": "membrane",
+      "default_measurement": "cell_surface_membrane_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["airway basal"],
+      "modalities": ["IF", "FACS"]
+    },
+    "KRT4": {
+      "aliases": ["CK4", "Krt4"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_keratin",
+      "localization": "cytoplasmic intermediate filament",
+      "lineages_or_states": ["suprabasal", "hillock"]
+    },
+    "KRT13": {
+      "aliases": ["CK13", "Krt13"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_keratin",
+      "localization": "cytoplasmic intermediate filament",
+      "lineages_or_states": ["suprabasal", "hillock", "regenerating basal subset"]
+    },
+    "KRT8": {
+      "aliases": ["CK8", "Krt8"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_keratin",
+      "localization": "cytoplasmic intermediate filament",
+      "lineages_or_states": ["broad simple epithelium", "DATP/ADI/PATS transitional when high with co-markers"],
+      "candidate_compartments": ["airway", "alveolar", "fibrotic", "tumor"],
+      "interpretation_caveat": "KRT8 alone is not a transitional-state identifier."
+    },
+    "FOXJ1": {
+      "aliases": ["Foxj1"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["multiciliated"]
+    },
+    "TUBB4A": {
+      "aliases": ["Tubb4a"],
+      "default_role": "apical_cilia",
+      "default_measurement": "apical_ciliary_support",
+      "localization": "ciliary axonemes",
+      "lineages_or_states": ["multiciliated"]
+    },
+    "AcTub": {
+      "aliases": ["acetylated alpha-tubulin", "acetylated tubulin", "Ac-alpha-Tubulin"],
+      "default_role": "apical_cilia",
+      "default_measurement": "apical_cilia_proximity",
+      "localization": "apical motile cilia",
+      "lineages_or_states": ["multiciliated"],
+      "candidate_compartments": ["airway"]
+    },
+    "DEUP1": {
+      "aliases": ["CCDC67", "Ccdc67"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_deuterosome_support",
+      "localization": "perinuclear deuterosomes",
+      "lineages_or_states": ["deuterosomal precursor"]
+    },
+    "FOXN4": {
+      "aliases": ["Foxn4"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["deuterosomal precursor"]
+    },
+    "SCGB1A1": {
+      "aliases": ["CC10", "CCSP", "Scgb1a1"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_secretory_cytoplasm",
+      "localization": "secretory cytoplasm",
+      "lineages_or_states": ["club/secretory", "BASC when co-expressed with SFTPC"],
+      "candidate_compartments": ["airway", "alveolar"],
+      "interpretation_caveat": "Current secretory phenotype does not prove lineage ancestry."
+    },
+    "SCGB3A1": {
+      "aliases": ["Scgb3a1"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_secretory_cytoplasm",
+      "localization": "secretory cytoplasm",
+      "lineages_or_states": ["club/secretory"]
+    },
+    "SCGB3A2": {
+      "aliases": ["Scgb3a2"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_secretory_cytoplasm",
+      "localization": "secretory cytoplasm",
+      "lineages_or_states": ["human RAS", "pre-terminal secretory", "AT0 with SFTPC"],
+      "species_note": "Prominent in human distal airway programs; mouse equivalence is incomplete."
+    },
+    "MUC5AC": {
+      "aliases": ["Muc5ac"],
+      "default_role": "regional_area",
+      "default_measurement": "secreted_mucin_positive_area",
+      "localization": "apical/secreted mucin",
+      "lineages_or_states": ["goblet"]
+    },
+    "MUC5B": {
+      "aliases": ["Muc5b"],
+      "default_role": "regional_area",
+      "default_measurement": "secreted_mucin_positive_area",
+      "localization": "apical/secreted mucin",
+      "lineages_or_states": ["goblet", "distal secretory"]
+    },
+    "SPDEF": {
+      "aliases": ["Spdef"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["goblet differentiation"]
+    },
+    "DCLK1": {
+      "aliases": ["Dclk1"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_support",
+      "localization": "cytoplasmic/apical",
+      "lineages_or_states": ["tuft/brush"]
+    },
+    "POU2F3": {
+      "aliases": ["Pou2f3"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["tuft/brush"]
+    },
+    "FOXI1": {
+      "aliases": ["Foxi1"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["pulmonary ionocyte"]
+    },
+    "CFTR": {
+      "aliases": ["Cftr"],
+      "default_role": "membrane",
+      "default_measurement": "apical_membrane_support",
+      "localization": "apical membrane",
+      "lineages_or_states": ["pulmonary ionocyte high", "other airway epithelial low"]
+    },
+    "ASCL1": {
+      "aliases": ["Ash1", "Ascl1"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["pulmonary neuroendocrine"]
+    },
+    "CALCA": {
+      "aliases": ["CGRP", "Calca"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_neuropeptide_cytoplasm",
+      "localization": "cytoplasmic/neuropeptide vesicles",
+      "lineages_or_states": ["pulmonary neuroendocrine"]
+    },
+    "CHGA": {
+      "aliases": ["Chromogranin A", "CgA"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_secretory_granules",
+      "localization": "secretory granules",
+      "lineages_or_states": ["neuroendocrine"]
+    },
+    "SYP": {
+      "aliases": ["Synaptophysin"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_vesicular_support",
+      "localization": "vesicular membrane",
+      "lineages_or_states": ["neuroendocrine"]
+    },
+    "NKX2-1": {
+      "aliases": ["TTF-1", "TTF1", "Nkx2-1"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["lung epithelial lineage", "many pulmonary adenocarcinomas"],
+      "candidate_compartments": ["airway", "alveolar", "tumor"],
+      "interpretation_caveat": "Not fully specific for lung adenocarcinoma and not uniformly positive."
+    },
+    "SFTPC": {
+      "aliases": ["ProSPC", "pro-SPC", "SP-C", "Sftpc"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_granular_cytoplasm",
+      "localization": "cytoplasmic surfactant/lamellar-body program",
+      "lineages_or_states": ["AT2", "BASC or AT0 only with secretory co-marker"],
+      "candidate_compartments": ["alveolar"]
+    },
+    "SFTPB": {
+      "aliases": ["SP-B", "Sftpb"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_granular_cytoplasm",
+      "localization": "cytoplasmic surfactant program",
+      "lineages_or_states": ["AT2", "distal secretory"]
+    },
+    "ABCA3": {
+      "aliases": ["Abca3"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_lamellar_body_support",
+      "localization": "lamellar-body membrane",
+      "lineages_or_states": ["AT2"]
+    },
+    "LAMP3": {
+      "aliases": ["Lamp3"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_lamellar_body_support",
+      "localization": "lysosomal/lamellar-body membrane",
+      "lineages_or_states": ["AT2"]
+    },
+    "AGER": {
+      "aliases": ["RAGE", "mRAGE", "Ager"],
+      "default_role": "membrane",
+      "default_measurement": "thin_membrane_support",
+      "localization": "plasma membrane",
+      "lineages_or_states": ["AT1"],
+      "candidate_compartments": ["alveolar"],
+      "interpretation_caveat": "Regional membrane area and cell-associated calls are different endpoints."
+    },
+    "PDPN": {
+      "aliases": ["T1A", "T1alpha", "podoplanin", "Pdpn"],
+      "default_role": "membrane",
+      "default_measurement": "thin_membrane_support",
+      "localization": "plasma membrane",
+      "lineages_or_states": ["AT1", "airway basal", "lymphatic and stromal populations"],
+      "candidate_compartments": ["alveolar", "airway", "stromal"],
+      "interpretation_caveat": "Compartment and co-markers are mandatory for an AT1 interpretation."
+    },
+    "AQP5": {
+      "aliases": ["Aqp5"],
+      "default_role": "membrane",
+      "default_measurement": "thin_membrane_support",
+      "localization": "apical/plasma membrane",
+      "lineages_or_states": ["AT1"],
+      "candidate_compartments": ["alveolar"]
+    },
+    "HOPX": {
+      "aliases": ["Hopx"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcriptional_regulator",
+      "localization": "nuclear",
+      "lineages_or_states": ["AT1", "late alveolar transition"]
+    },
+    "CAV1": {
+      "aliases": ["Caveolin-1", "Cav1"],
+      "default_role": "membrane",
+      "default_measurement": "thin_membrane_support",
+      "localization": "plasma membrane/caveolae",
+      "lineages_or_states": ["AT1", "endothelium"]
+    },
+    "GPRC5A": {
+      "aliases": ["Gprc5a"],
+      "default_role": "membrane",
+      "default_measurement": "cell_surface_membrane_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["AT1"]
+    },
+    "AXIN2": {
+      "aliases": ["Axin2"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_support",
+      "localization": "cytoplasmic Wnt target",
+      "lineages_or_states": ["Wnt-responsive AEP/AT2 subset"],
+      "interpretation_caveat": "RNA reporter or ISH is often more appropriate than IF."
+    },
+    "IL1R1": {
+      "aliases": ["CD121a", "Il1r1"],
+      "default_role": "membrane",
+      "default_measurement": "cell_surface_membrane_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["injury-primed AT2 subset", "other responsive cells"]
+    },
+    "CLDN4": {
+      "aliases": ["Claudin-4", "Cldn4"],
+      "default_role": "membrane",
+      "default_measurement": "junctional_membrane_support",
+      "localization": "cell junction/plasma membrane",
+      "lineages_or_states": ["DATP/ADI/PATS transitional with KRT8-high co-marker"]
+    },
+    "KRT19": {
+      "aliases": ["CK19", "Krt19"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_keratin",
+      "localization": "cytoplasmic intermediate filament",
+      "lineages_or_states": ["transitional epithelium", "many epithelial tumors"]
+    },
+    "KRT17": {
+      "aliases": ["CK17", "Krt17"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_keratin",
+      "localization": "cytoplasmic intermediate filament",
+      "lineages_or_states": ["aberrant basaloid when KRT5-negative in fibrotic alveolar regions", "basal/squamous programs"],
+      "candidate_compartments": ["airway", "fibrotic", "tumor"],
+      "interpretation_caveat": "KRT17-positive/KRT5-negative is a state pattern, not a diagnosis."
+    },
+    "ITGB6": {
+      "aliases": ["integrin beta-6", "Itgb6"],
+      "default_role": "membrane",
+      "default_measurement": "cell_surface_membrane_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["aberrant basaloid/profibrotic epithelial", "activated epithelium"]
+    },
+    "CDKN1A": {
+      "aliases": ["p21", "Cdkn1a"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_cell_cycle_regulator",
+      "localization": "nuclear",
+      "lineages_or_states": ["cell-cycle arrest/senescence-associated"],
+      "interpretation_caveat": "Not specific to one disease or lineage."
+    },
+    "SOX9": {
+      "aliases": ["Sox9"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["developmental distal tip", "aberrant basaloid/developmental reactivation"]
+    },
+    "PDGFRA": {
+      "aliases": ["CD140a", "Pdgfra"],
+      "default_role": "membrane",
+      "default_measurement": "cell_surface_membrane_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["alveolar fibroblast", "repair-supportive mesenchyme"]
+    },
+    "PDGFRB": {
+      "aliases": ["CD140b", "Pdgfrb"],
+      "default_role": "membrane",
+      "default_measurement": "cell_surface_membrane_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["pericyte/myofibroblast", "dysplastic injury-responsive mesenchyme"]
+    },
+    "ACTA2": {
+      "aliases": ["alpha-SMA", "aSMA", "SMA", "Acta2"],
+      "default_role": "regional_area",
+      "default_measurement": "contractile_structure_positive_area",
+      "localization": "cytoplasmic stress fibers",
+      "lineages_or_states": ["myofibroblast", "smooth muscle", "pericyte"],
+      "interpretation_caveat": "Regional anatomy is required to distinguish myofibroblasts from normal muscle."
+    },
+    "CTHRC1": {
+      "aliases": ["Cthrc1"],
+      "default_role": "regional_area",
+      "default_measurement": "fibrotic_stromal_positive_area",
+      "localization": "secreted/ECM-associated",
+      "lineages_or_states": ["pathogenic fibrotic myofibroblast"]
+    },
+    "COL1A1": {
+      "aliases": ["Collagen I", "COL1", "Col1a1"],
+      "default_role": "regional_area",
+      "default_measurement": "extracellular_matrix_positive_area",
+      "localization": "extracellular matrix",
+      "lineages_or_states": ["fibrotic matrix"],
+      "interpretation_caveat": "Area/fiber burden is appropriate; a per-nucleus identity call is not."
+    },
+    "PECAM1": {
+      "aliases": ["CD31", "Pecam1"],
+      "default_role": "membrane",
+      "default_measurement": "vascular_membrane_support",
+      "localization": "endothelial cell junction/plasma membrane",
+      "lineages_or_states": ["pan-endothelial"]
+    },
+    "CDH5": {
+      "aliases": ["VE-cadherin", "Cdh5"],
+      "default_role": "membrane",
+      "default_measurement": "vascular_junctional_support",
+      "localization": "endothelial junction",
+      "lineages_or_states": ["pan-endothelial"]
+    },
+    "ERG": {
+      "aliases": ["Erg"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["endothelial"]
+    },
+    "CA4": {
+      "aliases": ["CAR4", "Car4"],
+      "default_role": "membrane",
+      "default_measurement": "capillary_membrane_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["aerocyte capillary"]
+    },
+    "GPIHBP1": {
+      "aliases": ["Gpihbp1"],
+      "default_role": "membrane",
+      "default_measurement": "capillary_membrane_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["general capillary"]
+    },
+    "CD68": {
+      "aliases": ["Cd68"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_lysosomal_cytoplasm",
+      "localization": "lysosomal/cytoplasmic",
+      "lineages_or_states": ["macrophage/monocyte"]
+    },
+    "ITGAX": {
+      "aliases": ["CD11c", "Itgax"],
+      "default_role": "membrane",
+      "default_measurement": "cell_surface_membrane_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["alveolar macrophage", "dendritic subsets"]
+    },
+    "MRC1": {
+      "aliases": ["CD206", "Mrc1"],
+      "default_role": "membrane",
+      "default_measurement": "cell_surface_membrane_support",
+      "localization": "cell surface/endosomal",
+      "lineages_or_states": ["alveolar macrophage and reparative macrophage subsets"]
+    },
+    "FOXP3": {
+      "aliases": ["Foxp3"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["regulatory T cell"]
+    },
+    "IL2RA": {
+      "aliases": ["CD25", "Il2ra"],
+      "default_role": "membrane",
+      "default_measurement": "cell_surface_membrane_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["regulatory/activated T cell"]
+    },
+    "GATA3": {
+      "aliases": ["Gata3"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_transcription_factor",
+      "localization": "nuclear",
+      "lineages_or_states": ["ILC2", "type-2 T-cell programs"]
+    },
+    "NAPSA": {
+      "aliases": ["Napsin A", "Napsin-A"],
+      "default_role": "cyto",
+      "default_measurement": "granular_cytoplasmic_support",
+      "localization": "granular cytoplasm",
+      "lineages_or_states": ["AT2", "many pulmonary adenocarcinomas", "some renal tumors"],
+      "candidate_compartments": ["alveolar", "tumor"],
+      "research_contexts": ["lung_adenocarcinoma_lineage"],
+      "interpretation_caveat": "Normal AT2 cells and macrophage-adjacent signal can be positive; use tumor ROI and histomorphology."
+    },
+    "EPCAM": {
+      "aliases": ["CD326", "EpCAM"],
+      "default_role": "membrane",
+      "default_measurement": "epithelial_cell_surface_support",
+      "localization": "cell surface",
+      "lineages_or_states": ["broad epithelium", "many epithelial tumors"],
+      "interpretation_caveat": "Pan-epithelial support, not a lung adenocarcinoma-specific marker."
+    },
+    "KRT7": {
+      "aliases": ["CK7", "Krt7"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_keratin",
+      "localization": "cytoplasmic intermediate filament",
+      "lineages_or_states": ["broad glandular epithelium", "many lung adenocarcinomas"],
+      "interpretation_caveat": "Sensitive but not specific for pulmonary origin."
+    }
+  }
+}

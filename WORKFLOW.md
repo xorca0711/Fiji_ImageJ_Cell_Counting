@@ -20,8 +20,33 @@ comparing experimental groups.
   output schema.
 - [`docs/MARKER_MORPHOLOGY_GUIDE.md`](docs/MARKER_MORPHOLOGY_GUIDE.md): extended
   morphology and literature notes.
+- [`docs/UNIVERSAL_MARKER_CONFIGURATION.md`](docs/UNIVERSAL_MARKER_CONFIGURATION.md):
+  reusable marker, disease-context, panel, and ROI-tag hierarchy.
+- [`config/lung_marker_registry.json`](config/lung_marker_registry.json): marker
+  aliases, localization, lineage/state notes, and analytical-role defaults.
+- [`config/custom_panels.example.json`](config/custom_panels.example.json):
+  opt-in study panel templates; built-in panels remain unchanged.
 - [`docs/PILOT_G002_MORPHOLOGY_RESULTS.md`](docs/PILOT_G002_MORPHOLOGY_RESULTS.md):
   validated one-image pilots.
+
+## Universal marker-selection hierarchy
+
+Before analyzing a new marker set, freeze these layers in order:
+
+1. Research question and biological unit: lineage, transient state,
+   localization, regional burden, or spatial relationship.
+2. Species, preparation, modality, antibody clone, and known controls.
+3. Blinded anatomical/context ROIs.
+4. A lineage anchor, state marker, and nearest-alternative/exclusion marker.
+5. Analytical role: nuclear, nuclear ratio, cytoplasmic, membrane, apical
+   cilia, or regional area.
+6. Channel map and projection policy for the actual acquisition.
+7. Control-derived intensity cutoff and validated morphology/size gates.
+
+Marker identity, image channel, analytical geometry, and biological
+interpretation are separate. A marker registry entry may supply a geometry
+default, but it never assigns a disease diagnosis or a final cell identity.
+Unknown markers remain supported when the custom panel declares their role.
 
 ## End-to-end workflow
 
@@ -85,8 +110,9 @@ For each marker-specific support region, the pipeline calculates:
   for YAP, or the appropriate perinuclear/apical support for other roles.
 - **Ownership:** whether another included nucleus lies inside support that is
   meant to belong uniquely to the current cell. Shared support is indeterminate.
-- **Compartment:** whether a marker restricted to an airway or alveolar
-  interpretation is being evaluated in the correct anatomical ROI.
+- **Compartment/context:** whether the marker is evaluated in a compatible
+  airway, alveolar, tumor, fibrotic, stromal, vascular, or immune ROI. Multiple
+  tags can coexist in one ROI name.
 
 A final positive is the logical AND of all applicable gates. A final negative is
 allowed only when the marker is evaluable.
@@ -179,7 +205,14 @@ names:
 
 - `airway`, `airway_01`, or `bronchial_01`;
 - `alveoli` or `alveolar_01`;
+- `tumor_01` or `luad_01`;
+- `alveolar_fibrotic_01`, `honeycomb_01`, or `uip_01`;
+- `stromal_01`, `vascular_01`, or `immune_01`;
 - `ambiguous` or `ambiguous_01`.
+
+The pipeline exports all recognized labels as `region_tags`, while
+`compartment` remains a single backward-compatible primary label. A panel can
+accept any of several tags through `expectedCompartments`.
 
 For study runs:
 
@@ -235,6 +268,8 @@ removed from the environment token: `tdTOM` becomes `IFQ_TDTOM_THRESHOLD` and
 $env:IFQ_INPUT_DIR = 'G:\path\to\originals'
 $env:IFQ_OUTPUT_DIR = "$PWD\analysis_output\run_name"
 $env:IFQ_PANEL = 'E'
+$env:IFQ_MARKER_REGISTRY = "$PWD\config\lung_marker_registry.json"
+# For a new study: $env:IFQ_PANEL_CONFIG = 'D:\study\panels.json'
 $env:IFQ_INCLUDE_REGEX = '.*A01_G002_0001.*'
 $env:IFQ_MAX_IMAGES = '1'
 $env:IFQ_MORPHOLOGY_PRIMARY = 'true'
