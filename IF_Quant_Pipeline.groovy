@@ -220,23 +220,23 @@ def PANELS = [
   // The 4x stitched mapping file contains only the first three channels.
   "M": [ label:"M_4x_CC10_tdTOM_mapping",
     channels:[ [idx:1, marker:"DAPI",  role:"nuclear", qcColor:"blue"],
-               [idx:2, marker:"CC10",  role:"cyto",    qcColor:"green"],
+               [idx:2, marker:"CC10",  role:"cyto",    qcColor:"green", fileLabel:"CC10-488"],
                [idx:3, marker:"tdTOM", role:"cyto",    qcColor:"red", areaMarker:true] ],
     classify:[ ["tdTOM":true], ["CC10":true,"tdTOM":true] ] ],
 
   "E": [ label:"E_CC10_tdTOM_AcTub",
     channels:[ [idx:1, marker:"DAPI",  role:"nuclear", qcColor:"blue"],
-               [idx:2, marker:"CC10",  role:"cyto",    qcColor:"green"],
+               [idx:2, marker:"CC10",  role:"cyto",    qcColor:"green", fileLabel:"CC10-488"],
                [idx:3, marker:"tdTOM", role:"cyto",    qcColor:"red", areaMarker:true],
-               [idx:4, marker:"AcTub", role:"cyto",    qcColor:"white"] ],
+               [idx:4, marker:"AcTub", role:"cyto",    qcColor:"white", fileLabel:"AcTub-647"] ],
     classify:[ ["tdTOM":true], ["CC10":true,"tdTOM":true],
                ["AcTub":true,"tdTOM":true] ] ],
 
   "R": [ label:"R_T1A_tdTOM_mRAGE",
     channels:[ [idx:1, marker:"DAPI",  role:"nuclear",  qcColor:"blue"],
-               [idx:2, marker:"T1A",   role:"membrane", qcColor:"green"],
+               [idx:2, marker:"T1A",   role:"membrane", qcColor:"green", fileLabel:"T1alpha-488"],
                [idx:3, marker:"tdTOM", role:"cyto",     qcColor:"red", areaMarker:true],
-               [idx:4, marker:"mRAGE", role:"membrane", qcColor:"white"] ],
+               [idx:4, marker:"mRAGE", role:"membrane", qcColor:"white", fileLabel:"mRAGE-647"] ],
     classify:[ ["tdTOM":true], ["T1A":true,"tdTOM":true],
                ["mRAGE":true,"tdTOM":true] ] ],
 
@@ -642,6 +642,17 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
   IJ.log("---- " + new File(imgPath).name + "  [panel " + panelKey + "] ----")
   def sourceStem = new File(imgPath).name.replaceFirst(/\.[^.]+$/, "")
   def imgOut = ensureDir(outDir + "/" + outputKey)
+  def fileSafe = { value ->
+    def s = (value == null || value.toString().trim().isEmpty()) ? "NA" : value.toString().trim()
+    return s.replaceAll(/[^A-Za-z0-9._-]+/, "-").replaceAll(/^-+|-+$/, "")
+  }
+  // Use the marker map as the per-image filename prefix. The containing
+  // directory already identifies the specimen, so avoiding that duplication
+  // keeps Windows paths short enough to open reliably.
+  def channelSignature = panelDef.channels.sort { it.idx }.collect { c ->
+    "C" + c.idx + "-" + fileSafe(c.fileLabel ?: c.marker)
+  }.join("_")
+  def fileKey = channelSignature
 
   def raw = bfOpen(imgPath)
   Calibration cal = raw.getCalibration()
@@ -807,14 +818,14 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
 
     // ---- QC overlay for this region ----
     def qc = buildQcOverlay(markerImg, panelDef, region, allNucRois, qcMasks)
-    def qcPath = imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__QC.png"
+    def qcPath = imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__QC.png"
     IJ.saveAs(qc, "PNG", qcPath); qc.close()
     def dapiQc = buildDapiQc(dapi, region, allNucRois, rejectedNuclei, cfg)
-    IJ.saveAs(dapiQc, "PNG", imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__DAPI_QC.png")
+    IJ.saveAs(dapiQc, "PNG", imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__DAPI_QC.png")
     dapiQc.close()
     if (segmentation.candidateMask != null) {
       IJ.saveAs(segmentation.candidateMask, "Tiff",
-                imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__DAPI_candidate_mask.tif")
+                imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__DAPI_candidate_mask.tif")
       segmentation.candidateMask.close()
     }
 
@@ -850,18 +861,18 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     qcMasks.each { k, v -> v.close() }
 
     // save nuclei mask for the region
-    saveLabelMask(dapi, allNucRois, imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__nuclei_mask.tif")
-    saveLabelMask(dapi, rejectedNuclei.collect { it.roi }, imgOut.getAbsolutePath() + "/" + outputKey + "__" + regName + "__rejected_nuclei_mask.tif")
+    saveLabelMask(dapi, allNucRois, imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__nuclei_mask.tif")
+    saveLabelMask(dapi, rejectedNuclei.collect { it.roi }, imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__rejected_nuclei_mask.tif")
   }
 
   // save pod masks
   areaMasks.each { m, mask ->
-    IJ.saveAs(mask, "Tiff", imgOut.getAbsolutePath() + "/" + outputKey + "__" + m + "_pod_mask.tif")
+    IJ.saveAs(mask, "Tiff", imgOut.getAbsolutePath() + "/" + fileKey + "__" + m + "_pod_mask.tif")
   }
 
   // per-image params/provenance
   def params = [
-    image: new File(imgPath).name, output_key: outputKey,
+    image: new File(imgPath).name, output_key: outputKey, channel_signature: channelSignature,
     panel: panelKey, panel_label: panelDef.label,
     calibration: [ pixel_width_um: cal.pixelWidth, pixel_height_um: cal.pixelHeight,
                    pixel_depth_um: cal.pixelDepth, unit: cal.getUnit(),
@@ -884,16 +895,17 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     rejected_nucleus_rules: [minimum_area_um2: cfg.minNucArea, exclude_image_edge: true],
     channel_map: panelDef.channels
   ]
-  new File(imgOut, outputKey + "__params.json").text = JsonOutput.prettyPrint(JsonOutput.toJson(params))
+  new File(imgOut, fileKey + "__params.json").text = JsonOutput.prettyPrint(JsonOutput.toJson(params))
 
   // write per-image cell CSV
-  writeCsv(cellRows, imgOut.getAbsolutePath() + "/" + outputKey + "__cells.csv")
+  writeCsv(cellRows, imgOut.getAbsolutePath() + "/" + fileKey + "__cells.csv")
 
   // cleanup
   markerImg.each { k, v -> v.close() }
   areaMasks.each { k, v -> v.close() }
   raw.close()
-  return [summary: summaryRows, cells: cellRows.size(), tissue_source: tissue.source]
+  return [summary: summaryRows, cells: cellRows.size(), tissue_source: tissue.source,
+          channel_signature: channelSignature]
 }
 
 // ============================================================================
@@ -1147,7 +1159,7 @@ files.each { f ->
     if (res != null) {
       masterSummary.addAll(res.summary)
       manifest.images << [ file: f.name, relative_path: inDir.toPath().relativize(f.toPath()).toString(),
-                           output_key: outputKey, panel: panelKey,
+                           output_key: outputKey, panel: panelKey, channel_signature: res.channel_signature,
                            tissue_source: res.tissue_source, n_cells: res.cells ]
     }
   } catch (Throwable t) {

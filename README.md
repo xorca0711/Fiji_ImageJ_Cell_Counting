@@ -247,6 +247,14 @@ OUTPUT_DIR/
     └── <stem>__KRT5_pod_mask.tif       # binary pod mask (255 = KRT5⁺ pod)
 ```
 
+`<stem>` is a concise channel signature so every exported file is
+self-describing, for example
+`C1-DAPI_C2-T1alpha-488_C3-tdTOM_C4-mRAGE-647__cells.csv`. The containing
+directory carries the specimen ID, avoiding the long duplicated paths that
+Windows may fail to open. The same signature is stored in `__params.json` and
+`run_manifest.json`. For panels without a recorded fluorophore, the channel's
+biological marker name is used.
+
 **Key `run_summary.csv` columns** (marker columns vary by panel):
 
 - `mouse_id, section_id, genotype, condition, panel, region` — identifiers.
