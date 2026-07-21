@@ -123,6 +123,14 @@ def MIN_RING_POS_FRACTION = [
   "T1A": Double.parseDouble(envOr("IFQ_T1A_MIN_RING_FRACTION", "0.30")),
   "mRAGE": Double.parseDouble(envOr("IFQ_MRAGE_MIN_RING_FRACTION", "0.30"))
 ]
+// Acetylated alpha-tubulin is concentrated in apical motile cilia rather than
+// the perinuclear cytoplasm. At 20x, individual axonemes are not reliably
+// resolvable, so associate thresholded ciliary signal with a nucleus using a
+// wider proximity support zone and report ciliary patches as the primary
+// regional readout. These pilot defaults must still be frozen against controls.
+def ACTUB_SUPPORT_EXPAND_UM = Double.parseDouble(envOr("IFQ_ACTUB_SUPPORT_EXPAND_UM", "6.0"))
+def ACTUB_MIN_SUPPORT_FRACTION = Double.parseDouble(envOr("IFQ_ACTUB_MIN_SUPPORT_FRACTION", "0.02"))
+def ACTUB_MIN_PATCH_AREA_UM2 = Double.parseDouble(envOr("IFQ_ACTUB_MIN_PATCH_AREA_UM2", "0.50"))
 def DAPI_METHOD = envOr("IFQ_DAPI_METHOD", "local_phansalkar").toLowerCase() // local_phansalkar | global_otsu
 def DAPI_BACKGROUND_RADIUS_UM = Double.parseDouble(envOr("IFQ_DAPI_BACKGROUND_RADIUS_UM", "15.0"))
 def DAPI_LOCAL_RADIUS_UM = Double.parseDouble(envOr("IFQ_DAPI_LOCAL_RADIUS_UM", "4.0"))
@@ -220,15 +228,18 @@ def PANELS = [
   // The 4x stitched mapping file contains only the first three channels.
   "M": [ label:"M_4x_CC10_tdTOM_mapping",
     channels:[ [idx:1, marker:"DAPI",  role:"nuclear", qcColor:"blue"],
-               [idx:2, marker:"CC10",  role:"cyto",    qcColor:"green", fileLabel:"CC10-488"],
-               [idx:3, marker:"tdTOM", role:"cyto",    qcColor:"red", areaMarker:true] ],
+               [idx:2, marker:"CC10",  role:"cyto",    measurement:"perinuclear_secretory_cytoplasm", qcColor:"green", fileLabel:"CC10-488"],
+               [idx:3, marker:"tdTOM", role:"cyto",    measurement:"perinuclear_lineage_reporter", qcColor:"red",
+                areaMarker:true, areaMode:"reporter", areaMinAreaUm2:8.0d] ],
     classify:[ ["tdTOM":true], ["CC10":true,"tdTOM":true] ] ],
 
   "E": [ label:"E_CC10_tdTOM_AcTub",
     channels:[ [idx:1, marker:"DAPI",  role:"nuclear", qcColor:"blue"],
-               [idx:2, marker:"CC10",  role:"cyto",    qcColor:"green", fileLabel:"CC10-488"],
-               [idx:3, marker:"tdTOM", role:"cyto",    qcColor:"red", areaMarker:true],
-               [idx:4, marker:"AcTub", role:"cyto",    qcColor:"white", fileLabel:"AcTub-647"] ],
+               [idx:2, marker:"CC10",  role:"cyto",    measurement:"perinuclear_secretory_cytoplasm", qcColor:"green", fileLabel:"CC10-488"],
+               [idx:3, marker:"tdTOM", role:"cyto",    measurement:"perinuclear_lineage_reporter", qcColor:"red",
+                areaMarker:true, areaMode:"reporter", areaMinAreaUm2:8.0d],
+               [idx:4, marker:"AcTub", role:"apical_cilia", measurement:"apical_cilia_proximity", qcColor:"white", fileLabel:"AcTub-647",
+                areaMarker:true, areaMode:"ciliary", areaMinAreaUm2:ACTUB_MIN_PATCH_AREA_UM2, areaBlurSigmaPx:0.7d] ],
     classify:[ ["tdTOM":true], ["CC10":true,"tdTOM":true],
                ["AcTub":true,"tdTOM":true] ] ],
 
@@ -681,10 +692,13 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
   // refined per tissue region below).
   def tissue = resolveTissueRois(imgPath, dapi, cfg)
 
-  // Pre-build KRT5 (and any areaMarker) threshold masks once for pod area.
+  // Pre-build marker-specific area masks. KRT5 uses pod components, tdTOM uses
+  // lineage-reporter components, and AcTub uses ciliary patches.
   def areaMasks = [:]
   panelDef.channels.findAll { it.areaMarker }.each { c ->
-    areaMasks[c.marker] = buildThresholdMask(markerImg[c.marker], cfg.podBlur, cfg.podMethod)
+    double areaBlur = c.containsKey("areaBlurSigmaPx") ? (double)c.areaBlurSigmaPx : cfg.podBlur
+    String areaMethod = c.containsKey("areaThresholdMethod") ? c.areaThresholdMethod : cfg.podMethod
+    areaMasks[c.marker] = buildThresholdMask(markerImg[c.marker], areaBlur, areaMethod)
   }
 
   def cellRows = []      // per-object records (all regions)
@@ -722,21 +736,25 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       qcMasks[c.marker] = buildMaskAtThreshold(markerImg[c.marker], chThresh[c.marker])
     }
 
-    // ---- Pod area (areaMarkers, e.g. KRT5) ----
-    def podStats = [:]
+    // ---- Marker-positive area/components (pods, reporter fields, ciliary patches) ----
+    def areaStats = [:]
     panelDef.channels.findAll { it.areaMarker }.each { c ->
       def mask = areaMasks[c.marker]
-      double podArea = positiveAreaInRoi(mask, region)
-      // discrete pods: particle analysis of the mask restricted to region
+      String areaMode = c.areaMode ?: "pod"
+      double minComponentArea = c.containsKey("areaMinAreaUm2") ? (double)c.areaMinAreaUm2 : cfg.podMinArea
+      double positiveArea = positiveAreaInRoi(mask, region)
+      // Particle analysis is intentionally mode-specific: large KRT5 pods,
+      // reporter-positive cell/clusters, or subcellular ciliary patches.
       def maskReg = mask.duplicate(); maskReg.setCalibration(cal); maskReg.setRoi(region)
-      def podRois = particlesToRois(maskReg, cfg.podMinArea, false)
-      def podAreas = podRois.collect { measureRoi(mask, it).area }
-      def podThr = mask.getProperty("thresholdValue")
-      podStats[c.marker] = [ area_um2: podArea,
-                             frac_of_region: (regionAreaUm2 > 0 ? podArea/regionAreaUm2 : 0),
-                             n_pods: podRois.size(),
-                             mean_pod_area_um2: (podAreas.isEmpty()? 0 : podAreas.sum()/podAreas.size()),
-                             threshold: (podThr != null ? podThr : -1) ]
+      def componentRois = particlesToRois(maskReg, minComponentArea, false)
+      def componentAreas = componentRois.collect { measureRoi(mask, it).area }
+      def areaThr = mask.getProperty("thresholdValue")
+      areaStats[c.marker] = [ mode: areaMode, area_um2: positiveArea,
+                              frac_of_region: (regionAreaUm2 > 0 ? positiveArea/regionAreaUm2 : 0),
+                              n_components: componentRois.size(),
+                              mean_component_area_um2: (componentAreas.isEmpty()? 0 : componentAreas.sum()/componentAreas.size()),
+                              min_component_area_um2: minComponentArea,
+                              threshold: (areaThr != null ? areaThr : -1) ]
       maskReg.close()
     }
 
@@ -777,13 +795,29 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
           row[m + "_nuc_mean"] = nucVal
           row[m + "_cyto_mean"] = cytoVal
           row[m + "_nuc_cyto_ratio"] = (cytoVal > 0 ? nucVal/cytoVal : 0)
+        } else if (c.role == "apical_cilia") {
+          // Ciliary axonemes sit on the luminal/apical surface and commonly lie
+          // beyond a 2-um cytoplasmic ring in tissue sections. Use a wider
+          // support zone, and call proximity by the spatial fraction above the
+          // image/region threshold rather than by a diluted support-zone mean.
+          def support = RoiEnlarger.enlarge(nuc, (int)Math.round(cfg.actubSupportExpandUm / cal.pixelWidth))
+          spatialRoi = support ?: cellRoi
+          val = measureRoi(img, spatialRoi).mean
+          double supportFraction = fractionAboveThreshold(img, spatialRoi, chThresh[m])
+          row[m + "_support_fraction_above_threshold"] = supportFraction
+          row[m + "_minimum_support_fraction"] = cfg.actubMinSupportFraction
+          row[m + "_support_expand_um"] = cfg.actubSupportExpandUm
+          row[m + "_measurement_model"] = c.measurement ?: "apical_cilia_proximity"
         } else { // cyto / membrane: measure the perinuclear ring, not nucleus + ring
           def ring = ringOnly(nuc, cellRoi)
           spatialRoi = (ring != null) ? ring : cellRoi
           val = measureRoi(img, spatialRoi).mean
+          row[m + "_measurement_model"] = c.measurement ?: "perinuclear_ring"
         }
         row[m + "_mean"] = val
-        boolean intensityPos = val >= chThresh[m]
+        boolean intensityPos = (c.role == "apical_cilia") ?
+          ((double)row[m + "_support_fraction_above_threshold"] >= cfg.actubMinSupportFraction) :
+          (val >= chThresh[m])
         calls[m] = intensityPos
         row[m + "_pos"] = intensityPos ? 1 : 0
         row[m + "_threshold_source"] = chThreshSource[m]
@@ -849,12 +883,22 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
         srow[c.marker + "_true_pos_count"] = compartment == "unassigned" ? "" : truePosCount[c.marker]
       }
     }
-    podStats.each { m, ps ->
-      srow[m + "_pod_area_um2"] = ps.area_um2
-      srow[m + "_pod_area_frac"] = ps.frac_of_region
-      srow[m + "_n_pods"] = ps.n_pods
-      srow[m + "_mean_pod_area_um2"] = ps.mean_pod_area_um2
-      srow[m + "_pod_threshold"] = ps.threshold
+    areaStats.each { m, as ->
+      srow[m + "_positive_area_um2"] = as.area_um2
+      srow[m + "_positive_area_frac"] = as.frac_of_region
+      srow[m + "_n_components"] = as.n_components
+      srow[m + "_mean_component_area_um2"] = as.mean_component_area_um2
+      srow[m + "_min_component_area_um2"] = as.min_component_area_um2
+      srow[m + "_area_threshold"] = as.threshold
+      srow[m + "_area_mode"] = as.mode
+      // Keep the historical KRT5 pod fields for downstream compatibility.
+      if (as.mode == "pod") {
+        srow[m + "_pod_area_um2"] = as.area_um2
+        srow[m + "_pod_area_frac"] = as.frac_of_region
+        srow[m + "_n_pods"] = as.n_components
+        srow[m + "_mean_pod_area_um2"] = as.mean_component_area_um2
+        srow[m + "_pod_threshold"] = as.threshold
+      }
     }
     classCount.each { k, v -> srow["class_" + k + "_count"] = v }
     summaryRows << srow
@@ -865,9 +909,13 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     saveLabelMask(dapi, rejectedNuclei.collect { it.roi }, imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__rejected_nuclei_mask.tif")
   }
 
-  // save pod masks
-  areaMasks.each { m, mask ->
-    IJ.saveAs(mask, "Tiff", imgOut.getAbsolutePath() + "/" + fileKey + "__" + m + "_pod_mask.tif")
+  // Save morphology-specific binary masks with names that describe the unit.
+  panelDef.channels.findAll { it.areaMarker }.each { c ->
+    def mask = areaMasks[c.marker]
+    String areaMode = c.areaMode ?: "pod"
+    String suffix = areaMode == "pod" ? "pod_mask" :
+                    (areaMode == "ciliary" ? "ciliary_mask" : "reporter_positive_mask")
+    IJ.saveAs(mask, "Tiff", imgOut.getAbsolutePath() + "/" + fileKey + "__" + c.marker + "_" + suffix + ".tif")
   }
 
   // per-image params/provenance
@@ -885,6 +933,10 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                           blur_sigma_px: cfg.dapiBlurSigmaPx,
                           contrast_saturation_percent: cfg.dapiContrastSaturation ],
     ring_expand_um: cfg.ringExpandUm, min_nucleus_area_um2: cfg.minNucArea,
+    acetylated_tubulin_model: [ measurement: "apical_cilia_proximity_and_regional_patches",
+                                support_expand_um: cfg.actubSupportExpandUm,
+                                minimum_support_positive_fraction: cfg.actubMinSupportFraction,
+                                minimum_ciliary_patch_area_um2: cfg.actubMinPatchAreaUm2 ],
     pod_min_area_um2: cfg.podMinArea, pod_blur_sigma_px: cfg.podBlur, pod_thresh_method: cfg.podMethod,
     pos_sensitivity: cfg.sensitivity, black_background: cfg.blackBackground,
     fixed_pos_thresholds: cfg.fixedThresholds,
@@ -981,8 +1033,9 @@ def buildQcOverlay(markerImg, panelDef, Roi region, nucRois, channelMasks) {
   // Burn a compact legend into the exported PNG so colors remain auditable.
   cp.setColor(Color.BLACK); cp.setRoi(0, 0, Math.min(cp.getWidth(), 1190), 64); cp.fill()
   cp.resetRoi(); cp.setFont(new Font("SansSerif", Font.BOLD, 16)); cp.setColor(Color.WHITE)
-  cp.drawString("RAW: DAPI blue | T1A green | tdTOM red | mRAGE white", 10, 22)
-  cp.drawString("OUTLINES: counted DAPI nuclei cyan | ROI orange | marker regions green/red/white", 10, 48)
+  def rawLegend = panelDef.channels.collect { c -> c.marker + " " + (c.qcColor ?: "gray") }.join(" | ")
+  cp.drawString("RAW: " + rawLegend, 10, 22)
+  cp.drawString("OUTLINES: counted DAPI nuclei cyan | ROI orange | thresholded marker regions", 10, 48)
   return rgb
 }
 
@@ -1106,6 +1159,9 @@ def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles:
            podMinArea: POD_MIN_AREA_UM2, podBlur: POD_BLUR_SIGMA_PX, podMethod: POD_THRESH_METHOD,
            sensitivity: POS_SENSITIVITY, fixedThresholds: FIXED_POS_THRESHOLDS,
            minRingPosFraction: MIN_RING_POS_FRACTION, compartmentMode: COMPARTMENT_MODE,
+           actubSupportExpandUm: ACTUB_SUPPORT_EXPAND_UM,
+           actubMinSupportFraction: ACTUB_MIN_SUPPORT_FRACTION,
+           actubMinPatchAreaUm2: ACTUB_MIN_PATCH_AREA_UM2,
            tissueMode: TISSUE_MODE, tissueBlur: TISSUE_BLUR_SIGMA_PX,
            tissueMethod: TISSUE_THRESH_METHOD, tissueMinArea: TISSUE_MIN_AREA_UM2 ]
 
