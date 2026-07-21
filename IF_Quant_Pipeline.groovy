@@ -115,6 +115,12 @@ def INCLUDE_REGEX = envOr("IFQ_INCLUDE_REGEX", ".*")
 def MAX_IMAGES  = Integer.parseInt(envOr("IFQ_MAX_IMAGES", "0")) // 0 = all
 def TISSUE_MODE = envOr("IFQ_TISSUE_MODE", "auto").toLowerCase() // auto | whole_field
 def COMPARTMENT_MODE = envOr("IFQ_COMPARTMENT_MODE", "optional").toLowerCase() // optional | required
+// Explicit override for a visually reviewed, anatomically homogeneous field.
+// Never use this to force a mixed airway/alveolar image into one compartment.
+def WHOLE_FIELD_COMPARTMENT = envOr("IFQ_WHOLE_FIELD_COMPARTMENT", "unassigned").toLowerCase()
+if (!(WHOLE_FIELD_COMPARTMENT in ["unassigned", "airway", "alveolar", "ambiguous"])) {
+  throw new IllegalArgumentException("IFQ_WHOLE_FIELD_COMPARTMENT must be unassigned, airway, alveolar, or ambiguous")
+}
 def FIXED_POS_THRESHOLDS = [:]
 // Any marker can use a control-derived fixed cutoff via IFQ_<MARKER>_THRESHOLD.
 // Adaptive Otsu remains available for pilots but is explicitly reported as
@@ -234,7 +240,8 @@ def PANELS = [
   "A": [ label:"A_KRT5_AGER",
     channels:[ [idx:1, marker:"DAPI",  role:"nuclear"],
                [idx:2, marker:"KRT5",  role:"cyto",     areaMarker:true],
-               [idx:3, marker:"AGER",  role:"membrane", expectedCompartment:"alveolar"] ],
+               [idx:3, marker:"AGER",  role:"membrane", expectedCompartment:"alveolar",
+                areaMarker:true, areaMode:"membrane", areaMinAreaUm2:2.0d, areaBlurSigmaPx:0.7d] ],
     classify:[ ["KRT5":true,"AGER":false], ["KRT5":true,"AGER":true] ] ],
 
   "B": [ label:"B_KRT5_ProSPC",
@@ -259,7 +266,8 @@ def PANELS = [
   "P": [ label:"P_KRT5_PDPN",
     channels:[ [idx:1, marker:"DAPI", role:"nuclear"],
                [idx:2, marker:"KRT5", role:"cyto",     areaMarker:true],
-               [idx:3, marker:"PDPN", role:"membrane", expectedCompartment:"alveolar"] ],
+               [idx:3, marker:"PDPN", role:"membrane", expectedCompartment:"alveolar",
+                areaMarker:true, areaMode:"membrane", areaMinAreaUm2:2.0d, areaBlurSigmaPx:0.7d] ],
     classify:[ ["KRT5":true,"PDPN":false], ["KRT5":true,"PDPN":true] ] ],
 
   // Optional airway/epithelial marker.
@@ -291,10 +299,12 @@ def PANELS = [
 
   "R": [ label:"R_T1A_tdTOM_mRAGE",
     channels:[ [idx:1, marker:"DAPI",  role:"nuclear",  qcColor:"blue"],
-               [idx:2, marker:"T1A",   role:"membrane", expectedCompartment:"alveolar", qcColor:"green", fileLabel:"T1alpha-488"],
+               [idx:2, marker:"T1A",   role:"membrane", expectedCompartment:"alveolar", qcColor:"green", fileLabel:"T1alpha-488",
+                areaMarker:true, areaMode:"membrane", areaMinAreaUm2:2.0d, areaBlurSigmaPx:0.7d],
                [idx:3, marker:"tdTOM", role:"cyto", measurement:"perinuclear_lineage_reporter", qcColor:"red",
                 areaMarker:true, areaMode:"reporter", areaMinAreaUm2:8.0d],
-               [idx:4, marker:"mRAGE", role:"membrane", expectedCompartment:"alveolar", qcColor:"white", fileLabel:"mRAGE-647"] ],
+               [idx:4, marker:"mRAGE", role:"membrane", expectedCompartment:"alveolar", qcColor:"white", fileLabel:"mRAGE-647",
+                areaMarker:true, areaMode:"membrane", areaMinAreaUm2:2.0d, areaBlurSigmaPx:0.7d] ],
     classify:[ ["tdTOM":true], ["T1A":true,"tdTOM":true],
                ["mRAGE":true,"tdTOM":true] ] ],
 
@@ -690,6 +700,24 @@ def buildThresholdMask(ImagePlus ch, double blurSigma, String method) {
   return dup
 }
 
+// Remove connected foreground components below the declared physical area.
+// Applying this before both area measurement and mask export keeps the numeric
+// endpoint, component table, and saved QC mask internally consistent.
+def filterBinaryMaskByArea(ImagePlus mask, double minAreaUm2) {
+  def work = mask.duplicate()
+  work.setCalibration(mask.getCalibration())
+  def accepted = particlesToRois(work, minAreaUm2, false)
+  work.close()
+  def bp = new ByteProcessor(mask.getWidth(), mask.getHeight())
+  bp.setValue(255)
+  accepted.each { bp.fill(it) }
+  def out = new ImagePlus(mask.getTitle() + "_area_filtered", bp)
+  out.setCalibration(mask.getCalibration())
+  out.setProperty("thresholdValue", mask.getProperty("thresholdValue"))
+  out.setProperty("minimumComponentAreaUm2", minAreaUm2)
+  return out
+}
+
 // Perinuclear cytoplasm only = enlarged cell ROI minus the nucleus ROI.
 // Used for a true nuclear:cytoplasmic ratio (e.g. YAP). null if degenerate.
 def ringOnly(Roi nuc, Roi cell) {
@@ -856,13 +884,16 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
   // refined per tissue region below).
   def tissue = resolveTissueRois(imgPath, dapi, cfg)
 
-  // Pre-build marker-specific area masks. KRT5 uses pod components, tdTOM uses
-  // lineage-reporter components, and AcTub uses ciliary patches.
+  // Pre-build marker-specific area masks. The minimum component area is applied
+  // to the saved mask itself so reported area and component counts agree.
   def areaMasks = [:]
   panelDef.channels.findAll { it.areaMarker }.each { c ->
     double areaBlur = c.containsKey("areaBlurSigmaPx") ? (double)c.areaBlurSigmaPx : cfg.podBlur
     String areaMethod = c.containsKey("areaThresholdMethod") ? c.areaThresholdMethod : cfg.podMethod
-    areaMasks[c.marker] = buildThresholdMask(markerImg[c.marker], areaBlur, areaMethod)
+    double minArea = c.containsKey("areaMinAreaUm2") ? (double)c.areaMinAreaUm2 : cfg.podMinArea
+    def rawAreaMask = buildThresholdMask(markerImg[c.marker], areaBlur, areaMethod)
+    areaMasks[c.marker] = filterBinaryMaskByArea(rawAreaMask, minArea)
+    rawAreaMask.close()
   }
 
   def cellRows = []      // per-object records (all regions)
@@ -876,6 +907,9 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     def compartment = regionLower.contains("alveol") ? "alveolar" :
                       ((regionLower.contains("airway") || regionLower.contains("bronch")) ? "airway" :
                        (regionLower.contains("ambig") ? "ambiguous" : "unassigned"))
+    if (compartment == "unassigned" && cfg.wholeFieldCompartment != "unassigned") {
+      compartment = cfg.wholeFieldCompartment
+    }
     if (cfg.compartmentMode == "required" && compartment == "unassigned") {
       throw new IllegalArgumentException("Morphology classification required: name each manual ROI alveoli, airway, or ambiguous; found '" + regName + "'")
     }
@@ -1125,6 +1159,13 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     def dapiQc = buildDapiQc(dapi, region, allNucRois, rejectedNuclei, cfg)
     IJ.saveAs(dapiQc, "PNG", imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__DAPI_QC.png")
     dapiQc.close()
+    panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
+      def callQc = buildCallDecisionQc(dapi, region, allNucRois,
+                                       finalPositiveRois[c.marker], indeterminateRois[c.marker],
+                                       c.marker, chThreshSource[c.marker], cfg)
+      IJ.saveAs(callQc, "PNG", imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__" + c.marker + "_CALL_QC.png")
+      callQc.close()
+    }
     if (segmentation.candidateMask != null) {
       IJ.saveAs(segmentation.candidateMask, "Tiff",
                 imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__DAPI_candidate_mask.tif")
@@ -1170,6 +1211,17 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       srow[m + "_min_component_area_um2"] = as.min_component_area_um2
       srow[m + "_area_threshold"] = as.threshold
       srow[m + "_area_mode"] = as.mode
+      srow[m + "_area_threshold_source"] = "adaptive_otsu_exploratory"
+      def areaChannel = panelDef.channels.find { it.marker == m }
+      if (areaChannel?.expectedCompartment != null &&
+          (compartment == "unassigned" || compartment == "ambiguous")) {
+        srow[m + "_area_call_status"] = "exploratory_compartment_unassigned"
+      } else if (areaChannel?.expectedCompartment != null &&
+                 compartment != areaChannel.expectedCompartment) {
+        srow[m + "_area_call_status"] = "wrong_compartment_not_interpretable"
+      } else {
+        srow[m + "_area_call_status"] = "exploratory_adaptive_threshold"
+      }
       // Keep the historical KRT5 pod fields for downstream compatibility.
       if (as.mode == "pod") {
         srow[m + "_pod_area_um2"] = as.area_um2
@@ -1203,7 +1255,8 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     def mask = areaMasks[c.marker]
     String areaMode = c.areaMode ?: "pod"
     String suffix = areaMode == "pod" ? "pod_mask" :
-                    (areaMode == "ciliary" ? "ciliary_mask" : "reporter_positive_mask")
+                    (areaMode == "ciliary" ? "ciliary_mask" :
+                     (areaMode == "membrane" ? "membrane_positive_mask" : "reporter_positive_mask"))
     IJ.saveAs(mask, "Tiff", imgOut.getAbsolutePath() + "/" + fileKey + "__" + c.marker + "_" + suffix + ".tif")
   }
 
@@ -1235,6 +1288,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                           fixed_threshold_requirement: "confirmatory calls require predeclared control-derived thresholds" ],
     morphology_rules: cfg.morphologyRules,
     compartment_mode: cfg.compartmentMode,
+    whole_field_compartment: cfg.wholeFieldCompartment,
     minimum_ring_positive_fraction: cfg.minRingPosFraction,
     tissue_mode: cfg.tissueMode, tissue_roi_source: tissue.source,
     tissue_thresh_method: cfg.tissueMethod,
@@ -1354,6 +1408,29 @@ def buildDapiQc(ImagePlus dapi, Roi region, nucRois, rejectedNuclei, cfg) {
   return rgb
 }
 
+// Marker-specific decision audit: negative/evaluable nuclei are cyan, final
+// positives are green, and indeterminate nuclei are magenta. This directly
+// visualizes the hierarchy that downstream classifications consume.
+def buildCallDecisionQc(ImagePlus dapi, Roi region, allNucRois,
+                        positiveRois, indeterminateRois,
+                        String marker, String thresholdSource, cfg) {
+  def display = dapi.duplicate()
+  IJ.run(display, "Enhance Contrast...", "saturated=" + cfg.dapiContrastSaturation + " normalize")
+  if (display.getBitDepth() != 8) IJ.run(display, "8-bit", "")
+  def rgb = new ImagePlus(marker + "_call_QC", display.getProcessor().convertToRGB())
+  display.close()
+  ImageProcessor cp = rgb.getProcessor()
+  cp.setLineWidth(2); cp.setColor(new Color(255, 150, 0)); region.drawPixels(cp)
+  cp.setLineWidth(2); cp.setColor(new Color(0, 210, 255)); allNucRois.each { it.drawPixels(cp) }
+  cp.setLineWidth(3); cp.setColor(new Color(60, 255, 70)); positiveRois.each { it.drawPixels(cp) }
+  cp.setLineWidth(3); cp.setColor(new Color(230, 0, 255)); indeterminateRois.each { it.drawPixels(cp) }
+  cp.setMask(null); cp.setColor(Color.BLACK); cp.setRoi(0, 0, Math.min(cp.getWidth(), 1200), 61); cp.fill()
+  cp.resetRoi(); cp.setMask(null); cp.setFont(new Font("SansSerif", Font.BOLD, 16)); cp.setColor(Color.WHITE)
+  cp.drawString(marker + " FINAL CALLS: positive green | negative cyan | indeterminate magenta | ROI orange", 10, 23)
+  cp.drawString("Threshold source: " + thresholdSource + " | authority: morphology", 10, 48)
+  return rgb
+}
+
 def saveLabelMask(ImagePlus ref, nucRois, String path) {
   // 16-bit labels so >255 nuclei per region do not collide.
   def ip = new ShortProcessor(ref.getWidth(), ref.getHeight())
@@ -1454,6 +1531,7 @@ def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles:
            sensitivity: POS_SENSITIVITY, fixedThresholds: FIXED_POS_THRESHOLDS,
            morphologyPrimary: MORPHOLOGY_PRIMARY, morphologyRules: MORPHOLOGY_RULES,
            minRingPosFraction: MIN_RING_POS_FRACTION, compartmentMode: COMPARTMENT_MODE,
+           wholeFieldCompartment: WHOLE_FIELD_COMPARTMENT,
            actubSupportExpandUm: ACTUB_SUPPORT_EXPAND_UM,
            actubMinSupportFraction: ACTUB_MIN_SUPPORT_FRACTION,
            actubMinPatchAreaUm2: ACTUB_MIN_PATCH_AREA_UM2,

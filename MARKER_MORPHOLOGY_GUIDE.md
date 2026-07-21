@@ -166,6 +166,11 @@ Use `IFQ_COMPARTMENT_MODE=required` for study runs. An unrecognized or ambiguous
 required compartment produces indeterminate calls for compartment-dependent
 markers.
 
+For a visually reviewed, anatomically homogeneous field only,
+`IFQ_WHOLE_FIELD_COMPARTMENT` can record an explicit `airway` or `alveolar`
+assignment in provenance. Do not use this override on a mixed field; draw
+separate compartment ROIs instead.
+
 ### Analytical sectioning
 
 Choose one of: nucleus, perinuclear cytoplasmic ring, membrane-support ring,
@@ -193,22 +198,28 @@ positive counts, morphology negative counts, indeterminate counts, and evaluable
 counts. Classification rules use `<marker>_final_call`, never `<marker>_pos`.
 
 Each marker also receives a morphology-positive nuclei label mask and an
-indeterminate nuclei label mask for QC.
+indeterminate nuclei label mask for QC, plus a call-QC PNG with positives in
+green, evaluable negatives in cyan, and indeterminate nuclei in magenta.
 
-## 7. G002/G003 morphology-primary pilot
+## 7. One-image-per-panel morphology-primary pilot
 
-The whole-field pilot rerun is a hierarchy test, not a final biological result.
-It produced:
+The final pilot is a hierarchy test, not a biological endpoint. It used one 20x
+G002 field from panel E and one 20x G002 field from panel R:
 
-| Field | Nuclei | CC10 morphology + / - / indeterminate | tdTomato morphology + / - / indeterminate | AcTub per-cell calls |
-|---|---:|---:|---:|---:|
-| G002 | 2,909 | 1,431 / 1,340 / 138 | 659 / 2,112 / 138 | 2,909 indeterminate |
-| G003 | 3,146 | 1,308 / 1,666 / 172 | 817 / 2,157 / 172 | 3,146 indeterminate |
+| Panel/field | Nuclei | Marker morphology + / - / indeterminate | Filtered regional area |
+|---|---:|---:|---:|
+| E / G002 | 2,909 | CC10 1,431 / 1,340 / 138 | tdTomato 35,371.4 um2 (8.73%) |
+| E / G002 | 2,909 | tdTomato 659 / 2,112 / 138 | AcTub 25,171.6 um2 (6.22%) |
+| E / G002 | 2,909 | AcTub 0 / 0 / 2,909 | Compartment unassigned |
+| R / G002 | 2,108 | T1A 429 / 1,571 / 108 | 29,792.5 um2 (7.36%) |
+| R / G002 | 2,108 | tdTomato 1,183 / 817 / 108 | 73,498.7 um2 (18.15%) |
+| R / G002 | 2,108 | mRAGE 113 / 1,887 / 108 | 12,203.2 um2 (3.01%) |
 
-The CC10 and tdTomato calls are labeled exploratory because the pilot used
-image-specific Otsu thresholds. All AcTub per-cell calls are indeterminate
-because the whole-field ROI has no airway assignment. Regional AcTub ciliary
-area and components are still exported.
+All calls and areas are exploratory because the pilot used image-specific Otsu
+thresholds. The mixed panel-E field was not forced to `airway`, so all AcTub
+per-cell calls are indeterminate. The inspected panel-R field was homogeneous
+alveolar parenchyma and used a provenance-recorded whole-field `alveolar`
+assignment. See `PILOT_G002_MORPHOLOGY_RESULTS.md` for full results.
 
 ## 8. QC and control acceptance
 

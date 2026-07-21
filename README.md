@@ -255,6 +255,7 @@ groups are compared; the example values above are not validated cutoffs.
 | `POD_THRESH_METHOD` | auto-threshold method for the pod mask (`Otsu`, `Li`, …) |
 | `POS_SENSITIVITY` | per-marker multiplier on the auto threshold (`>1` stricter, `<1` more permissive) |
 | `IFQ_MORPHOLOGY_PRIMARY` | `true` by default; makes the three-state morphology call authoritative |
+| `IFQ_WHOLE_FIELD_COMPARTMENT` | explicit compartment for a visually reviewed homogeneous field: `airway`, `alveolar`, `ambiguous`, or `unassigned` |
 | `IFQ_<MARKER>_THRESHOLD` | fixed control-derived candidate-pixel cutoff for a marker |
 | `IFQ_<MARKER>_MIN_POSITIVE_FRACTION` | minimum fraction of the role-specific support above cutoff |
 | `IFQ_<MARKER>_MIN_LARGEST_COMPONENT_SHARE` | minimum connectedness of positive support |
@@ -288,9 +289,11 @@ OUTPUT_DIR/
     ├── <stem>__<region>__nuclei_mask.tif  # 16-bit label mask of nuclei
     ├── <stem>__<region>__<marker>_morphology_positive_nuclei_mask.tif
     ├── <stem>__<region>__<marker>_indeterminate_nuclei_mask.tif
+    ├── <stem>__<region>__<marker>_CALL_QC.png  # final positive/negative/indeterminate overlay
     ├── <stem>__KRT5_pod_mask.tif       # binary pod mask (255 = KRT5⁺ pod)
     ├── <stem>__tdTOM_reporter_positive_mask.tif
-    └── <stem>__AcTub_ciliary_mask.tif  # thresholded ciliary patches
+    ├── <stem>__AcTub_ciliary_mask.tif  # area-filtered ciliary patches
+    └── <stem>__T1A_membrane_positive_mask.tif  # analogous AGER/PDPN/mRAGE masks
 ```
 
 `<stem>` is a concise channel signature so every exported file is
@@ -317,6 +320,8 @@ biological marker name is used.
 - `<marker>_positive_area_um2`, `<marker>_positive_area_frac`,
   `<marker>_n_components`, `<marker>_area_mode` — morphology-neutral regional
   fields; for panel E the modes are `reporter` (tdTomato) and `ciliary` (AcTub).
+  Components below the declared physical minimum are excluded from the saved
+  mask and from the area endpoint.
 - `class_<rule>_count`, `class_<rule>_evaluable_count`, and
   `class_<rule>_indeterminate_count` — classifications consume only final calls.
 
