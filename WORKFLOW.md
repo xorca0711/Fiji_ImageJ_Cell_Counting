@@ -294,8 +294,19 @@ The per-cell CSV includes:
 - `<marker>_true_pos`: compatibility alias for the final call.
 
 The region summary separately reports raw mean-intensity, morphology-positive,
-morphology-negative, indeterminate, and evaluable counts. Classification rules
-use `<marker>_final_call`, never `<marker>_pos`.
+morphology-negative, indeterminate, and evaluable counts. It also exports:
+
+- nucleus-candidate acceptance and rejection fractions, with rejection reasons;
+- marker positive/negative fractions among evaluable cells;
+- marker indeterminate fractions among included nuclei;
+- raw-intensity-positive/final-negative and
+  raw-intensity-negative/final-positive disagreement counts;
+- an intensity-morphology discordance fraction and a review-burden proxy
+  (`indeterminate + discordant`) for longitudinal script QC.
+
+These audit fractions are sensitivity and review-burden proxies, not validated
+false-positive or false-negative rates. Classification rules use
+`<marker>_final_call`, never `<marker>_pos`.
 
 Every marker receives morphology-positive and indeterminate nuclei label masks,
 plus a call-QC PNG with positive nuclei in green, evaluable negatives in cyan,

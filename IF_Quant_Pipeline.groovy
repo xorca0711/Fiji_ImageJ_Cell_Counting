@@ -1212,6 +1212,11 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     def finalPosCount = [:].withDefault { 0 }
     def finalNegCount = [:].withDefault { 0 }
     def indeterminateCount = [:].withDefault { 0 }
+    // Audit how often legacy mean intensity and the morphology-authoritative
+    // final call disagree. These are sensitivity/QC counters, not ground-truth
+    // false-positive or false-negative labels.
+    def rawPosFinalNegCount = [:].withDefault { 0 }
+    def rawNegFinalPosCount = [:].withDefault { 0 }
     def classCount = [:].withDefault { 0 }
     def classEvaluableCount = [:].withDefault { 0 }
     def allNucRois = []
@@ -1390,8 +1395,10 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
         if (finalCall == 1) {
           finalPosCount[m] = finalPosCount[m] + 1
           finalPositiveRois[m] << nuc
+          if (!intensityPos) rawNegFinalPosCount[m] = rawNegFinalPosCount[m] + 1
         } else if (finalCall == 0) {
           finalNegCount[m] = finalNegCount[m] + 1
+          if (intensityPos) rawPosFinalNegCount[m] = rawPosFinalNegCount[m] + 1
         } else {
           indeterminateRois[m] << nuc
         }
@@ -1441,17 +1448,27 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     }
 
     // ---- region summary row ----
+    def nucleusCandidateTotal = nuclei.size() + rejectedNuclei.size()
+    def rejectedBelowMin = rejectedNuclei.count { it.reason == "area_below_minimum" }
+    def rejectedAtEdge = rejectedNuclei.count { it.reason == "image_edge" }
+    def rejectedByParticle = rejectedNuclei.count { it.reason == "particle_filter" }
     def srow = [ image: sourceStem, panel: panelKey, region: regName,
                  mouse_id: meta.mouse_id, section_id: meta.section_id,
                  genotype: meta.genotype, condition: meta.condition, compartment: compartment,
                  region_tags: regionTags.join("|"),
                  region_area_um2: regionAreaUm2,
-                 dapi_segmentation_method: cfg.dapiMethod,
-                 n_nuclei: nuclei.size(),
-                 n_rejected_nucleus_candidates: rejectedNuclei.size(),
-                 n_rejected_below_min_area: rejectedNuclei.count { it.reason == "area_below_minimum" },
-                 n_rejected_at_image_edge: rejectedNuclei.count { it.reason == "image_edge" },
-                 n_rejected_by_particle_filter: rejectedNuclei.count { it.reason == "particle_filter" } ]
+                  dapi_segmentation_method: cfg.dapiMethod,
+                  n_nuclei: nuclei.size(),
+                  n_rejected_nucleus_candidates: rejectedNuclei.size(),
+                  n_rejected_below_min_area: rejectedBelowMin,
+                  n_rejected_at_image_edge: rejectedAtEdge,
+                  n_rejected_by_particle_filter: rejectedByParticle,
+                  n_nucleus_candidates_total: nucleusCandidateTotal,
+                  nucleus_candidate_acceptance_fraction: (nucleusCandidateTotal > 0 ? nuclei.size() / (double)nucleusCandidateTotal : 0),
+                  nucleus_candidate_rejection_fraction: (nucleusCandidateTotal > 0 ? rejectedNuclei.size() / (double)nucleusCandidateTotal : 0),
+                  rejected_below_min_fraction_of_rejected: (!rejectedNuclei.isEmpty() ? rejectedBelowMin / (double)rejectedNuclei.size() : 0),
+                  rejected_edge_fraction_of_rejected: (!rejectedNuclei.isEmpty() ? rejectedAtEdge / (double)rejectedNuclei.size() : 0),
+                  rejected_particle_filter_fraction_of_rejected: (!rejectedNuclei.isEmpty() ? rejectedByParticle / (double)rejectedNuclei.size() : 0) ]
     cellChannels.each { c ->
       // The conventional summary fields follow the authoritative final call.
       // Raw object-mean decisions remain available under explicit audit names.
@@ -1466,7 +1483,24 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       srow[c.marker + "_morphology_pos_count"] = finalPosCount[c.marker]
       srow[c.marker + "_morphology_negative_count"] = finalNegCount[c.marker]
       srow[c.marker + "_indeterminate_count"] = indeterminateCount[c.marker]
-      srow[c.marker + "_morphology_evaluable_count"] = finalPosCount[c.marker] + finalNegCount[c.marker]
+      def evaluableCount = finalPosCount[c.marker] + finalNegCount[c.marker]
+      def discordantCount = rawPosFinalNegCount[c.marker] + rawNegFinalPosCount[c.marker]
+      def reviewBurdenCount = indeterminateCount[c.marker] + discordantCount
+      srow[c.marker + "_morphology_evaluable_count"] = evaluableCount
+      srow[c.marker + "_morphology_positive_fraction_of_evaluable"] =
+        (evaluableCount > 0 ? finalPosCount[c.marker] / (double)evaluableCount : 0)
+      srow[c.marker + "_morphology_negative_fraction_of_evaluable"] =
+        (evaluableCount > 0 ? finalNegCount[c.marker] / (double)evaluableCount : 0)
+      srow[c.marker + "_indeterminate_fraction_of_included"] =
+        (!nuclei.isEmpty() ? indeterminateCount[c.marker] / (double)nuclei.size() : 0)
+      srow[c.marker + "_raw_positive_final_negative_count"] = rawPosFinalNegCount[c.marker]
+      srow[c.marker + "_raw_negative_final_positive_count"] = rawNegFinalPosCount[c.marker]
+      srow[c.marker + "_intensity_morphology_discordant_count"] = discordantCount
+      srow[c.marker + "_intensity_morphology_discordant_fraction_of_evaluable"] =
+        (evaluableCount > 0 ? discordantCount / (double)evaluableCount : 0)
+      srow[c.marker + "_review_burden_proxy_count"] = reviewBurdenCount
+      srow[c.marker + "_review_burden_proxy_fraction_of_included"] =
+        (!nuclei.isEmpty() ? reviewBurdenCount / (double)nuclei.size() : 0)
       srow[c.marker + "_morphology_density_per_mm2"] =
         (regionAreaUm2 > 0 ? finalPosCount[c.marker] / (regionAreaUm2/1e6) : 0)
       srow[c.marker + "_true_pos_count"] = finalPosCount[c.marker] // compatibility alias
