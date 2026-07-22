@@ -17,6 +17,7 @@ ref_images/*.tiff
 ref_images/*.jpg
 
 # Pipeline outputs
+.tmp/
 analysis_output/
 pilot_output/
 test_runs/

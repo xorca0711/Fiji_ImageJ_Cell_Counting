@@ -1,10 +1,12 @@
-# Fiji/ImageJ confocal quantification — IFN-γ KO / PR8 influenza injury
+# Fiji/ImageJ Lung Immunofluorescence Quantification
 
-A reproducible Fiji (ImageJ) pipeline for quantifying immunofluorescence
-confocal sections from the **IFN-γ knockout / PR8 (H1N1) influenza lung-injury**
-model. The headline readout is the **KRT5⁺ dysplastic "pod" area**, with
-supporting alveolar (AT1/AT2), immune (CD4/CD8) and airway (Sox2) markers, plus
-a future mechanistic panel (p63/YAP).
+A morphology-first Fiji/ImageJ pipeline for lung immunofluorescence across
+different image layouts and research questions. The validated built-in panels
+retain the **IFN-γ knockout / PR8 influenza-injury** workflow and KRT5 pod
+readout. An opt-in marker registry and study-owned JSON panel map extend the
+same engine to acute injury/regeneration, IPF/fibrosis, stromal, vascular,
+immune, and lung-adenocarcinoma lineage research without hard-coding each new
+antibody combination.
 
 - **`IF_Quant_Pipeline.groovy`** — the analysis pipeline (run inside Fiji).
 - **`aggregate_to_mouse.py`** — rolls per-region results up to the **mouse**
@@ -12,6 +14,8 @@ a future mechanistic panel (p63/YAP).
 - **`samplesheet_template.csv`** — per-image metadata template.
 - **[`WORKFLOW.md`](WORKFLOW.md)** — current end-to-end operational sequence.
 - **[`docs/`](docs/README.md)** — marker morphology and validated pilot results.
+- **[`config/`](config/README.md)** — universal marker registry and custom-panel
+  examples.
 - **[`legacy/`](legacy/README.md)** — non-authoritative historical archive.
 
 ---
@@ -39,11 +43,13 @@ genotypes can be compared fairly.
 
 ---
 
-## 2. Panel / antibody design
+## 2. Built-in panels and universal marker configuration
 
-Acquisition limit is **3 markers per slide = DAPI + 2 primaries**. Choose the
-panel per slide via the samplesheet. Panel keys are single tokens so they also
-survive filename parsing.
+The table below preserves the original study panels. Choose a built-in panel
+through the samplesheet or `IFQ_PANEL`. The engine itself is not limited to a
+fixed number of markers: a panel can map any available acquisition channels,
+including non-contiguous channel indices, as long as exactly one channel is the
+nuclear segmentation channel.
 
 | Panel | Channels (acquisition order)      | Purpose                                | Key classification      | Scheme 1 slides |
 |:-----:|-----------------------------------|----------------------------------------|-------------------------|:---------------:|
@@ -66,6 +72,20 @@ Marker roles the pipeline understands:
   ratio (needs a single Z-plane; see caveats).
 - **apical_cilia** (acetylated alpha-tubulin) — thresholded apical-cilia
   patches plus an explicitly approximate nucleus-proximity association.
+- **regional_area** (COL1A1, CTHRC1, ACTA2, mucins) — independent positive-area
+  mask without a per-nucleus positive/negative call.
+
+For a new study, copy
+[`config/custom_panels.example.json`](config/custom_panels.example.json), edit
+the channel indices and marker set, and load it with `IFQ_PANEL_CONFIG`. Marker
+aliases, localization, lineage/state notes, and default analytical roles are in
+[`config/lung_marker_registry.json`](config/lung_marker_registry.json). The
+registry is not a whitelist or diagnostic classifier; an unknown marker can be
+used by declaring its role explicitly.
+
+See
+[`docs/UNIVERSAL_MARKER_CONFIGURATION.md`](docs/UNIVERSAL_MARKER_CONFIGURATION.md)
+for the IPF, acute-injury, lung-adenocarcinoma, ROI-tag, and control hierarchy.
 
 See [`docs/MARKER_MORPHOLOGY_GUIDE.md`](docs/MARKER_MORPHOLOGY_GUIDE.md) for the complete
 marker-by-marker measurement, compartment-gating, optical-sectioning, control,
@@ -98,8 +118,9 @@ acetylated alpha-tubulin is measured as ciliary patches plus a 6-µm
 nucleus-adjacent support zone. At 20x the latter is an association with nearby
 cilia, not proof that an individual nucleus owns a resolved axoneme.
 
-To change which acquisition channel is which marker, edit the `idx:` values in
-the `PANELS` block at the top of the Groovy script.
+Do not edit built-in `PANELS` for a new acquisition. Put the new `idx:` mapping
+in a study-owned JSON file so the channel map is versioned independently from
+the analysis engine.
 
 ---
 
@@ -141,7 +162,8 @@ Every requested feature maps to the pipeline:
    - `INPUT_DIR` — folder of confocal files (`.czi/.lif/.nd2/.oib/.tif…`).
    - `OUTPUT_DIR` — where results are written.
    - `PANEL` — default panel if a file has no samplesheet/filename hint.
-   - Confirm the channel `idx:` order in `PANELS` matches your acquisition.
+   - For a new acquisition, set `IFQ_PANEL_CONFIG` to a study-owned JSON file
+     and confirm its channel `idx` map against Bio-Formats metadata.
 3. **(Recommended) Add metadata.** Copy `samplesheet_template.csv` into
    `INPUT_DIR`, rename to **`samplesheet.csv`**, and fill one row per image.
    This is what carries `mouse_id` through every export — essential for correct
@@ -183,6 +205,8 @@ Paths and test selection can be supplied without editing the Groovy file:
 $env:IFQ_INPUT_DIR = 'G:\내 드라이브\260719-CW'
 $env:IFQ_OUTPUT_DIR = "$PWD\test_runs\260719-CW_CC10_smoke"
 $env:IFQ_PANEL = 'E'                 # M=4x DAPI/CC10/tdTOM; E/R=20x panels
+$env:IFQ_MARKER_REGISTRY = "$PWD\config\lung_marker_registry.json"
+# New studies only: $env:IFQ_PANEL_CONFIG = 'D:\study\panels.json'
 $env:IFQ_RECURSIVE = 'true'
 $env:IFQ_INCLUDE_REGEX = '.*CC10_488.*20x 2k_Cycle.*G001_0001\.oir$'
 $env:IFQ_MAX_IMAGES = '1'            # 0 means all matching files

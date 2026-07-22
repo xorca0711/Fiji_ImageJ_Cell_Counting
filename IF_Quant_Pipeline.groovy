@@ -1,13 +1,16 @@
 /*
  * ============================================================================
  *  IF_Quant_Pipeline.groovy
- *  Confocal immunofluorescence quantification for the IFN-gamma KO / PR8
- *  influenza injury project (KRT5 pod remodeling readout).
+ *  Morphology-first lung immunofluorescence quantification. The built-in
+ *  panels preserve the IFN-gamma KO / PR8 influenza-injury KRT5-pod workflow;
+ *  optional JSON panel maps support other lung research contexts.
  * ----------------------------------------------------------------------------
- *  Antibody set: KRT5, Pro-SPC, AGER, PDPN, CD4, CD8, Sox2  (+ p63, YAP, Aqp5)
+ *  Built-in antibody set: KRT5, Pro-SPC, AGER, PDPN, CD4, CD8, Sox2
+ *  (+ p63, YAP, Aqp5, CC10, tdTomato, AcTub, T1A, mRAGE).
  *
- *  Panels (max 3 markers/slide = DAPI + 2 primaries). PANEL keys are single
- *  tokens so they survive filename parsing; pick per slide via samplesheet:
+ *  Built-in panels. PANEL keys are single tokens so they survive filename
+ *  parsing; select per image via samplesheet. New panels are loaded through
+ *  IFQ_PANEL_CONFIG and may map any available acquisition channels:
  *     A : DAPI | KRT5 | AGER      -> pod + AT1 boundary   (KRT5+/AGER-)   [Scheme1 x3]
  *     B : DAPI | KRT5 | Pro-SPC   -> regeneration readout (AT2)          [Scheme1 x2]
  *     C : DAPI | KRT5 | CD8       -> cytotoxic T infiltrate              [Scheme1 x1]
@@ -90,6 +93,7 @@ import loci.plugins.BF
 import loci.plugins.in.ImporterOptions
 import loci.formats.FormatTools
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import java.awt.Color
 import java.awt.Font
 import java.awt.Rectangle
@@ -109,6 +113,11 @@ def envOr = { String name, String fallback ->
 def INPUT_DIR   = envOr("IFQ_INPUT_DIR", new File("ref_images").getAbsolutePath())
 def OUTPUT_DIR  = envOr("IFQ_OUTPUT_DIR", new File("analysis_output").getAbsolutePath())
 def PANEL       = envOr("IFQ_PANEL", "T")
+// The registry is descriptive evidence and supplies safe role defaults. A
+// separate panel JSON maps the actual acquisition channels for a study. This
+// keeps biological identity, analytical geometry, and image layout independent.
+def MARKER_REGISTRY_PATH = envOr("IFQ_MARKER_REGISTRY", new File("config/lung_marker_registry.json").getAbsolutePath())
+def PANEL_CONFIG_PATH = envOr("IFQ_PANEL_CONFIG", "")
 def FILE_GLOB   = ~/(?i).*\.(czi|lif|nd2|oir|oib|oif|ics|tif|tiff)$/
 def RECURSIVE   = envOr("IFQ_RECURSIVE", "false").toBoolean()
 def INCLUDE_REGEX = envOr("IFQ_INCLUDE_REGEX", ".*")
@@ -118,8 +127,10 @@ def COMPARTMENT_MODE = envOr("IFQ_COMPARTMENT_MODE", "optional").toLowerCase() /
 // Explicit override for a visually reviewed, anatomically homogeneous field.
 // Never use this to force a mixed airway/alveolar image into one compartment.
 def WHOLE_FIELD_COMPARTMENT = envOr("IFQ_WHOLE_FIELD_COMPARTMENT", "unassigned").toLowerCase()
-if (!(WHOLE_FIELD_COMPARTMENT in ["unassigned", "airway", "alveolar", "ambiguous"])) {
-  throw new IllegalArgumentException("IFQ_WHOLE_FIELD_COMPARTMENT must be unassigned, airway, alveolar, or ambiguous")
+def ALLOWED_COMPARTMENTS = ["unassigned", "airway", "alveolar", "tumor", "fibrotic",
+                            "stromal", "vascular", "immune", "ambiguous"] as Set
+if (!ALLOWED_COMPARTMENTS.contains(WHOLE_FIELD_COMPARTMENT)) {
+  throw new IllegalArgumentException("IFQ_WHOLE_FIELD_COMPARTMENT must be one of " + ALLOWED_COMPARTMENTS)
 }
 def FIXED_POS_THRESHOLDS = [:]
 // Any marker can use a control-derived fixed cutoff via IFQ_<MARKER>_THRESHOLD.
@@ -154,6 +165,17 @@ def ACTUB_MIN_PATCH_AREA_UM2 = Double.parseDouble(envOr("IFQ_ACTUB_MIN_PATCH_ARE
 // Defaults are conservative PILOT values and must be calibrated from blinded
 // positive/negative controls before a final cohort run.
 def MORPHOLOGY_PRIMARY = envOr("IFQ_MORPHOLOGY_PRIMARY", "true").toBoolean()
+// These are geometry-class pilot defaults, not biological truth. Marker-level
+// validated values below take precedence, followed by explicit channel-level
+// overrides from IFQ_PANEL_CONFIG. Unknown markers therefore never need to be
+// added to source code merely to participate in the same measurement model.
+def ROLE_MORPHOLOGY_DEFAULTS = [
+  "cyto"        : [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
+  "membrane"    : [minFraction:0.25d, minLargestShare:0.40d, requireOwnership:true],
+  "nuc_marker"  : [minFraction:0.40d, minLargestShare:0.60d, requireOwnership:false, minNuclearEnrichment:1.25d],
+  "nuc_ratio"   : [minFraction:0.30d, minLargestShare:0.60d, requireOwnership:false, minNucCytoRatio:1.50d],
+  "apical_cilia": [minFraction:ACTUB_MIN_SUPPORT_FRACTION, minLargestShare:0.30d, requireOwnership:true]
+]
 def MORPHOLOGY_RULES = [
   "KRT5" : [minFraction:0.20d, minLargestShare:0.50d, requireOwnership:true],
   "AGER" : [minFraction:0.25d, minLargestShare:0.40d, requireOwnership:true],
@@ -333,6 +355,195 @@ def PANELS = [
                [idx:4, marker:"YAP",  role:"nuc_ratio"] ],
     classify:[ ["KRT5":true,"p63":true], ["KRT5":true,"YAP":true] ] ]
 ]
+
+// ---------------------------------------------------------------------------
+// Optional universal marker registry + study-specific panel configuration
+// ---------------------------------------------------------------------------
+// The registry never diagnoses a disease and never assigns a cell identity by
+// itself. It records aliases, localization, modalities, and research contexts,
+// and can supply a default analytical role when a custom panel omits one.
+def normalizeMarkerToken = { value ->
+  value == null ? "" : value.toString().toUpperCase().replaceAll(/[^A-Z0-9]+/, "")
+}
+def markerRegistryFile = new File(MARKER_REGISTRY_PATH)
+def MARKER_REGISTRY = [schema_version:"unavailable", markers:[:], research_profiles:[:]]
+if (markerRegistryFile.isFile()) {
+  try {
+    def parsed = new JsonSlurper().parse(markerRegistryFile)
+    if (!(parsed instanceof Map) || !(parsed.markers instanceof Map)) {
+      throw new IllegalArgumentException("registry root must contain a 'markers' object")
+    }
+    MARKER_REGISTRY = parsed
+  } catch (Throwable t) {
+    throw new IllegalArgumentException("Cannot parse IFQ_MARKER_REGISTRY '" + markerRegistryFile + "': " + t.message, t)
+  }
+} else {
+  IJ.log("Marker registry not found; explicit channel roles remain fully supported: " + markerRegistryFile)
+}
+
+def markerProfileIndex = [:]
+(MARKER_REGISTRY.markers ?: [:]).each { canonical, profile ->
+  ([canonical] + (profile.aliases ?: [])).each { alias ->
+    String token = normalizeMarkerToken(alias)
+    if (!token.isEmpty()) markerProfileIndex[token] = [canonical:canonical, profile:profile]
+  }
+}
+def markerProfileFor = { marker -> markerProfileIndex[normalizeMarkerToken(marker)] }
+
+// A custom panel file is opt-in. It can add panels but cannot silently replace
+// the validated built-ins. See config/custom_panels.example.json.
+def CUSTOM_PANEL_KEYS = []
+if (PANEL_CONFIG_PATH != null && !PANEL_CONFIG_PATH.trim().isEmpty()) {
+  def panelConfigFile = new File(PANEL_CONFIG_PATH)
+  if (!panelConfigFile.isFile()) {
+    throw new IllegalArgumentException("IFQ_PANEL_CONFIG is not a file: " + panelConfigFile)
+  }
+  def customDoc
+  try {
+    customDoc = new JsonSlurper().parse(panelConfigFile)
+  } catch (Throwable t) {
+    throw new IllegalArgumentException("Cannot parse IFQ_PANEL_CONFIG '" + panelConfigFile + "': " + t.message, t)
+  }
+  if (!(customDoc instanceof Map) || !(customDoc.panels instanceof Map) || customDoc.panels.isEmpty()) {
+    throw new IllegalArgumentException("IFQ_PANEL_CONFIG must contain a non-empty 'panels' object")
+  }
+  customDoc.panels.each { rawKey, rawPanel ->
+    String panelKey = rawKey.toString()
+    if (!(panelKey ==~ /[A-Za-z0-9][A-Za-z0-9_.-]*/)) {
+      throw new IllegalArgumentException("Invalid custom panel key: " + panelKey)
+    }
+    if (PANELS.containsKey(panelKey)) {
+      throw new IllegalArgumentException("Custom panel key would replace a built-in panel: " + panelKey)
+    }
+    if (!(rawPanel instanceof Map)) {
+      throw new IllegalArgumentException("Custom panel '" + panelKey + "' must be an object")
+    }
+    if (!(rawPanel.channels instanceof Collection) || rawPanel.channels.isEmpty()) {
+      throw new IllegalArgumentException("Custom panel '" + panelKey + "' needs a non-empty channels array")
+    }
+    def channels = rawPanel.channels.collect { rawChannel ->
+      if (!(rawChannel instanceof Map)) {
+        throw new IllegalArgumentException("Every channel in panel '" + panelKey + "' must be an object")
+      }
+      def c = [:]
+      c.putAll(rawChannel)
+      def matchedProfile = markerProfileFor(c.marker)
+      if ((c.role == null || c.role.toString().trim().isEmpty()) && matchedProfile != null) {
+        c.role = matchedProfile.profile.default_role
+      }
+      if (c.measurement == null && matchedProfile?.profile?.default_measurement != null) {
+        c.measurement = matchedProfile.profile.default_measurement
+      }
+      if (matchedProfile != null) c.registryKey = matchedProfile.canonical
+      if (c.role == "regional_area") {
+        c.cellCall = false
+        c.areaMarker = true
+        if (c.areaMode == null) c.areaMode = "generic"
+      }
+      return c
+    }
+    PANELS[panelKey] = [label:(rawPanel.label ?: panelKey).toString(),
+                        channels:channels, classify:(rawPanel.classify ?: [])]
+    CUSTOM_PANEL_KEYS << panelKey
+  }
+}
+
+def ALLOWED_CHANNEL_ROLES = ["nuclear", "cyto", "membrane", "nuc_marker",
+                             "nuc_ratio", "apical_cilia", "regional_area"] as Set
+PANELS.each { panelKey, panelDef ->
+  if (!(panelDef.channels instanceof Collection) || panelDef.channels.isEmpty()) {
+    throw new IllegalArgumentException("Panel '" + panelKey + "' has no channels")
+  }
+  panelDef.channels.each { c ->
+    if (c.idx == null || (c.idx as int) < 1) {
+      throw new IllegalArgumentException("Panel '" + panelKey + "' has an invalid channel idx")
+    }
+    if (c.marker == null || c.marker.toString().trim().isEmpty()) {
+      throw new IllegalArgumentException("Panel '" + panelKey + "' has a channel without a marker")
+    }
+    if (c.role == null || !ALLOWED_CHANNEL_ROLES.contains(c.role.toString())) {
+      throw new IllegalArgumentException("Panel '" + panelKey + "', marker '" + c.marker +
+                                         "' needs one of roles " + ALLOWED_CHANNEL_ROLES)
+    }
+    if (c.role == "regional_area") {
+      c.cellCall = false
+      c.areaMarker = true
+      if (c.areaMode == null) c.areaMode = "generic"
+      if (c.areaMinAreaUm2 == null) {
+        throw new IllegalArgumentException("Area-only marker '" + c.marker + "' in panel '" + panelKey +
+                                           "' needs areaMinAreaUm2; no universal biological size cutoff exists")
+      }
+    }
+    ["minPositiveFraction", "minLargestComponentShare"].each { field ->
+      if (c[field] != null && (((double)c[field]) < 0.0d || ((double)c[field]) > 1.0d)) {
+        throw new IllegalArgumentException(field + " must be between 0 and 1 for marker '" + c.marker + "'")
+      }
+    }
+  }
+  def indexes = panelDef.channels.collect { it.idx as int }
+  if (indexes.unique().size() != indexes.size()) {
+    throw new IllegalArgumentException("Panel '" + panelKey + "' repeats a channel idx")
+  }
+  def markerNames = panelDef.channels.collect { it.marker.toString() }
+  if (markerNames.unique().size() != markerNames.size()) {
+    throw new IllegalArgumentException("Panel '" + panelKey + "' repeats a marker name")
+  }
+  if (panelDef.channels.count { it.role == "nuclear" } != 1) {
+    throw new IllegalArgumentException("Panel '" + panelKey + "' must contain exactly one nuclear segmentation channel")
+  }
+  def callableMarkers = panelDef.channels.findAll { it.role != "nuclear" && it.cellCall != false }
+                                        .collect { it.marker.toString() } as Set
+  (panelDef.classify ?: []).each { classRule ->
+    if (!(classRule instanceof Map) || classRule.isEmpty()) {
+      throw new IllegalArgumentException("Panel '" + panelKey + "' contains an empty classification rule")
+    }
+    classRule.each { marker, wanted ->
+      if (!callableMarkers.contains(marker.toString())) {
+        throw new IllegalArgumentException("Panel '" + panelKey + "' classifies unavailable/area-only marker '" + marker + "'")
+      }
+      if (!(wanted instanceof Boolean)) {
+        throw new IllegalArgumentException("Classification values must be true/false in panel '" + panelKey + "'")
+      }
+    }
+  }
+}
+if (!PANELS.containsKey(PANEL)) {
+  throw new IllegalArgumentException("IFQ_PANEL '" + PANEL + "' is unknown. Available panels: " + PANELS.keySet().sort())
+}
+
+// Extend thresholds and morphology rules to every marker that appears in any
+// panel. Explicit marker rules remain intact; new markers inherit only their
+// geometry-class defaults until a study validates channel-specific settings.
+def allAnalysisChannels = PANELS.values().collectMany { it.channels }
+                               .findAll { it.role != "nuclear" }
+allAnalysisChannels.each { c ->
+  String marker = c.marker.toString()
+  String token = normalizeMarkerToken(marker)
+  def rawThreshold = System.getenv("IFQ_" + token + "_THRESHOLD")
+  if (rawThreshold != null && !rawThreshold.trim().isEmpty()) {
+    FIXED_POS_THRESHOLDS[marker] = Double.parseDouble(rawThreshold.trim())
+  }
+  if (!POS_SENSITIVITY.containsKey(marker)) POS_SENSITIVITY[marker] = 1.0d
+  if (c.cellCall != false && !MORPHOLOGY_RULES.containsKey(marker)) {
+    def roleRule = ROLE_MORPHOLOGY_DEFAULTS[c.role]
+    if (roleRule == null) {
+      throw new IllegalArgumentException("No cell-call morphology defaults for role '" + c.role + "'")
+    }
+    MORPHOLOGY_RULES[marker] = new LinkedHashMap(roleRule)
+  }
+}
+// Apply environment overrides after custom markers have been registered.
+MORPHOLOGY_RULES.each { marker, rule ->
+  String token = normalizeMarkerToken(marker)
+  rule.minFraction = Double.parseDouble(envOr("IFQ_" + token + "_MIN_POSITIVE_FRACTION", rule.minFraction.toString()))
+  rule.minLargestShare = Double.parseDouble(envOr("IFQ_" + token + "_MIN_LARGEST_COMPONENT_SHARE", rule.minLargestShare.toString()))
+  if (rule.containsKey("minNuclearEnrichment")) {
+    rule.minNuclearEnrichment = Double.parseDouble(envOr("IFQ_" + token + "_MIN_NUCLEAR_ENRICHMENT", rule.minNuclearEnrichment.toString()))
+  }
+  if (rule.containsKey("minNucCytoRatio")) {
+    rule.minNucCytoRatio = Double.parseDouble(envOr("IFQ_" + token + "_MIN_NUC_CYTO_RATIO", rule.minNucCytoRatio.toString()))
+  }
+}
 
 // ============================================================================
 //  3. PROVENANCE
@@ -689,11 +900,18 @@ def buildMaskAtThreshold(ImagePlus ch, double threshold) {
 // Build a binary mask ImagePlus (255 = signal) from a channel by threshold.
 // The numeric lower threshold is stashed as a property for provenance export.
 // Requires Prefs.blackBackground=true (set in main) so foreground = 255.
-def buildThresholdMask(ImagePlus ch, double blurSigma, String method) {
+def buildThresholdMask(ImagePlus ch, double blurSigma, String method, Double fixedThreshold = null) {
   ImagePlus dup = ch.duplicate()
   if (blurSigma > 0) new GaussianBlur().blurGaussian(dup.getProcessor(), blurSigma)
-  IJ.setAutoThreshold(dup, method + " dark")
-  double thr = dup.getProcessor().getMinThreshold()   // raw intensity, -1 if unset
+  double upper = dup.getBitDepth() == 8 ? 255.0d : (dup.getBitDepth() == 16 ? 65535.0d : Double.MAX_VALUE)
+  double thr
+  if (fixedThreshold != null) {
+    thr = fixedThreshold
+    dup.getProcessor().setThreshold(thr, upper, ImageProcessor.NO_LUT_UPDATE)
+  } else {
+    IJ.setAutoThreshold(dup, method + " dark")
+    thr = dup.getProcessor().getMinThreshold()   // raw intensity, -1 if unset
+  }
   IJ.run(dup, "Convert to Mask", "")
   dup.setCalibration(ch.getCalibration())
   dup.setProperty("thresholdValue", thr)
@@ -859,7 +1077,10 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
 
   def raw = bfOpen(imgPath)
   Calibration cal = raw.getCalibration()
-  def nChExpected = panelDef.channels.size()
+  // Channel maps may intentionally skip an unused acquisition channel. The
+  // highest referenced index, not the number of mapped channels, defines the
+  // minimum acquisition size.
+  def nChExpected = panelDef.channels.collect { it.idx as int }.max()
   def channels = ChannelSplitter.split(raw)
   if (channels.length < nChExpected) {
     IJ.log("  WARNING: found " + channels.length + " channels, panel expects " + nChExpected + " -> skipped")
@@ -879,6 +1100,17 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     if (c.role == "nuclear") nuclearMarker = c.marker
   }
   def dapi = markerImg[nuclearMarker]
+  def nonNuclearChannels = panelDef.channels.findAll { it.role != "nuclear" }
+  def cellChannels = nonNuclearChannels.findAll { it.cellCall != false }
+  def expectedCompartmentsFor = { c ->
+    def expected = []
+    if (c.expectedCompartments instanceof Collection) {
+      expected.addAll(c.expectedCompartments.collect { it.toString().toLowerCase() })
+    } else if (c.expectedCompartment != null) {
+      expected << c.expectedCompartment.toString().toLowerCase()
+    }
+    return expected.unique()
+  }
 
   // Precompute per-marker positivity thresholds (Otsu within whole field first;
   // refined per tissue region below).
@@ -887,12 +1119,16 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
   // Pre-build marker-specific area masks. The minimum component area is applied
   // to the saved mask itself so reported area and component counts agree.
   def areaMasks = [:]
+  def areaThresholdSources = [:]
   panelDef.channels.findAll { it.areaMarker }.each { c ->
     double areaBlur = c.containsKey("areaBlurSigmaPx") ? (double)c.areaBlurSigmaPx : cfg.podBlur
     String areaMethod = c.containsKey("areaThresholdMethod") ? c.areaThresholdMethod : cfg.podMethod
     double minArea = c.containsKey("areaMinAreaUm2") ? (double)c.areaMinAreaUm2 : cfg.podMinArea
-    def rawAreaMask = buildThresholdMask(markerImg[c.marker], areaBlur, areaMethod)
+    boolean fixedAreaThreshold = cfg.fixedThresholds.containsKey(c.marker)
+    Double resolvedAreaThreshold = fixedAreaThreshold ? (double)cfg.fixedThresholds[c.marker] : null
+    def rawAreaMask = buildThresholdMask(markerImg[c.marker], areaBlur, areaMethod, resolvedAreaThreshold)
     areaMasks[c.marker] = filterBinaryMaskByArea(rawAreaMask, minArea)
+    areaThresholdSources[c.marker] = fixedAreaThreshold ? "fixed_predeclared" : "adaptive_otsu_exploratory"
     rawAreaMask.close()
   }
 
@@ -904,14 +1140,25 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     def region = reg.roi
     def regName = reg.name
     def regionLower = regName.toLowerCase()
-    def compartment = regionLower.contains("alveol") ? "alveolar" :
-                      ((regionLower.contains("airway") || regionLower.contains("bronch")) ? "airway" :
-                       (regionLower.contains("ambig") ? "ambiguous" : "unassigned"))
-    if (compartment == "unassigned" && cfg.wholeFieldCompartment != "unassigned") {
-      compartment = cfg.wholeFieldCompartment
+    def regionTags = []
+    if (regionLower.contains("alveol")) regionTags << "alveolar"
+    if (regionLower.contains("airway") || regionLower.contains("bronch")) regionTags << "airway"
+    if (regionLower.contains("tumor") || regionLower.contains("tumour") || regionLower.contains("luad")) regionTags << "tumor"
+    if (regionLower.contains("fibrot") || regionLower.contains("honeycomb") || regionLower.contains("uip")) regionTags << "fibrotic"
+    if (regionLower.contains("strom") || regionLower.contains("mesench")) regionTags << "stromal"
+    if (regionLower.contains("vascul") || regionLower.contains("vessel") || regionLower.contains("capillar")) regionTags << "vascular"
+    if (regionLower.contains("immune") || regionLower.contains("inflamm") || regionLower.contains("lymph")) regionTags << "immune"
+    if (regionLower.contains("ambig")) regionTags = ["ambiguous"]
+    regionTags = regionTags.unique()
+    if (regionTags.isEmpty() && cfg.wholeFieldCompartment != "unassigned") {
+      regionTags << cfg.wholeFieldCompartment
     }
-    if (cfg.compartmentMode == "required" && compartment == "unassigned") {
-      throw new IllegalArgumentException("Morphology classification required: name each manual ROI alveoli, airway, or ambiguous; found '" + regName + "'")
+    def compartment = regionTags.contains("ambiguous") ? "ambiguous" :
+                      (regionTags.contains("alveolar") ? "alveolar" :
+                       (regionTags.contains("airway") ? "airway" :
+                        (regionTags.isEmpty() ? "unassigned" : regionTags[0])))
+    if (cfg.compartmentMode == "required" && regionTags.isEmpty()) {
+      throw new IllegalArgumentException("Morphology classification required: use a recognizable anatomical/context ROI name; found '" + regName + "'")
     }
     def regStat = measureRoi(dapi, region)   // area of region
     double regionAreaUm2 = regStat.area
@@ -919,7 +1166,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     // per-marker channel thresholds inside THIS region (adaptive)
     def chThresh = [:]
     def chThreshSource = [:]
-    panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
+    nonNuclearChannels.each { c ->
       boolean fixed = cfg.fixedThresholds.containsKey(c.marker)
       double t = fixed ? (double)cfg.fixedThresholds[c.marker] : autoThresholdInRoi(markerImg[c.marker], region, "Otsu")
       double sens = fixed ? 1.0d : (cfg.sensitivity[c.marker] ?: 1.0)
@@ -930,7 +1177,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     // Region boundaries for each fluorescence channel; these replace the
     // former per-cell marker-positive circles in the QC overlay.
     def qcMasks = [:]
-    panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
+    nonNuclearChannels.each { c ->
       qcMasks[c.marker] = buildMaskAtThreshold(markerImg[c.marker], chThresh[c.marker])
     }
 
@@ -952,7 +1199,8 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                               n_components: componentRois.size(),
                               mean_component_area_um2: (componentAreas.isEmpty()? 0 : componentAreas.sum()/componentAreas.size()),
                               min_component_area_um2: minComponentArea,
-                              threshold: (areaThr != null ? areaThr : -1) ]
+                              threshold: (areaThr != null ? areaThr : -1),
+                              threshold_source: areaThresholdSources[c.marker] ]
       maskReg.close()
     }
 
@@ -974,7 +1222,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       allNucRois << nuc
       def cellRoi = RoiEnlarger.enlarge(nuc, (int)Math.round(cfg.ringExpandUm / cal.pixelWidth))
       def row = [ image: sourceStem, panel: panelKey, region: regName,
-                  compartment: compartment, cell_id: (ni + 1) ]
+                  compartment: compartment, region_tags: regionTags.join("|"), cell_id: (ni + 1) ]
       row.mouse_id = meta.mouse_id; row.section_id = meta.section_id
       row.genotype = meta.genotype; row.condition = meta.condition
       def cs = measureRoi(dapi, nuc)
@@ -982,10 +1230,19 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
 
       def calls = [:]       // morphology-authoritative three-state calls: 1, 0, or ""
       def rawCalls = [:]    // legacy mean-intensity calls retained for audit only
-      panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
+      cellChannels.each { c ->
         def m = c.marker
         def img = markerImg[m]
-        def rule = cfg.morphologyRules[m] ?: [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true]
+        def rule = new LinkedHashMap(cfg.roleMorphologyDefaults[c.role] ?:
+                                     [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true])
+        if (cfg.morphologyRules[m] != null) rule.putAll(cfg.morphologyRules[m])
+        // Per-channel overrides are the final authority because the same
+        // antigen can require different geometry in different assays.
+        if (c.minPositiveFraction != null) rule.minFraction = c.minPositiveFraction as double
+        if (c.minLargestComponentShare != null) rule.minLargestShare = c.minLargestComponentShare as double
+        if (c.requireOwnership != null) rule.requireOwnership = c.requireOwnership as boolean
+        if (c.minNuclearEnrichment != null) rule.minNuclearEnrichment = c.minNuclearEnrichment as double
+        if (c.minNucCytoRatio != null) rule.minNucCytoRatio = c.minNucCytoRatio as double
         def spatialRoi = nuc
         def ownershipSupport = null
         double val, nucVal = 0.0d, cytoVal = 0.0d, enrichmentRatio = 0.0d
@@ -1019,11 +1276,12 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
           // beyond a 2-um cytoplasmic ring in tissue sections. Use a wider
           // support zone, and call proximity by the spatial fraction above the
           // image/region threshold rather than by a diluted support-zone mean.
-          def support = RoiEnlarger.enlarge(nuc, (int)Math.round(cfg.actubSupportExpandUm / cal.pixelWidth))
+          double supportExpandUm = c.supportExpandUm != null ? (double)c.supportExpandUm : cfg.actubSupportExpandUm
+          def support = RoiEnlarger.enlarge(nuc, (int)Math.round(supportExpandUm / cal.pixelWidth))
           spatialRoi = support ?: cellRoi
           ownershipSupport = spatialRoi
           val = measureRoi(img, spatialRoi).mean
-          row[m + "_support_expand_um"] = cfg.actubSupportExpandUm
+          row[m + "_support_expand_um"] = supportExpandUm
           row[m + "_measurement_model"] = c.measurement ?: "apical_cilia_proximity"
         } else { // cyto / membrane: measure the perinuclear ring, not nucleus + ring
           def ring = ringOnly(nuc, cellRoi)
@@ -1031,6 +1289,13 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
           ownershipSupport = cellRoi
           val = measureRoi(img, spatialRoi).mean
           row[m + "_measurement_model"] = c.measurement ?: "perinuclear_ring"
+        }
+
+        if (c.requiresSinglePlane == true) {
+          projectionValid = raw.getNSlices() <= 1 || cfg.projection == "single"
+        }
+        if (!row.containsKey(m + "_measurement_model")) {
+          row[m + "_measurement_model"] = c.measurement ?: c.role
         }
 
         def supportStats = spatialSupportStats(img, spatialRoi, chThresh[m])
@@ -1047,12 +1312,13 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
           enrichmentPass = enrichmentRatio >= (double)(rule.minNucCytoRatio ?: 1.0d)
         }
 
-        boolean compartmentAssigned = compartment != "unassigned" && compartment != "ambiguous"
-        boolean compartmentPass = c.expectedCompartment == null ||
-                                  (compartmentAssigned && compartment == c.expectedCompartment)
+        def expectedCompartments = expectedCompartmentsFor(c)
+        boolean compartmentAssigned = !regionTags.isEmpty() && !regionTags.contains("ambiguous")
+        boolean compartmentPass = expectedCompartments.isEmpty() ||
+                                  (compartmentAssigned && expectedCompartments.any { regionTags.contains(it) })
         boolean evaluable = supportStats.total > 0 && projectionValid
         def indeterminateReasons = []
-        if (c.expectedCompartment != null && !compartmentAssigned) {
+        if (!expectedCompartments.isEmpty() && !compartmentAssigned) {
           evaluable = false
           indeterminateReasons << "compartment_unassigned"
         }
@@ -1061,7 +1327,9 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
           indeterminateReasons << "shared_perinuclear_support"
         }
         if (!projectionValid) {
-          indeterminateReasons << "projection_invalid_for_nuclear_ratio"
+          indeterminateReasons << (c.role == "nuc_ratio" ?
+                                    "projection_invalid_for_nuclear_ratio" :
+                                    "projection_invalid_for_marker")
         }
         if (supportStats.total <= 0) {
           indeterminateReasons << "empty_spatial_support"
@@ -1081,7 +1349,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
         row[m + "_connected_pattern_pass"] = connectedPass ? 1 : 0
         row[m + "_ownership_clear"] = ownershipClear ? 1 : 0
         row[m + "_projection_valid"] = projectionValid ? 1 : 0
-        row[m + "_expected_compartment"] = c.expectedCompartment ?: "none"
+        row[m + "_expected_compartment"] = expectedCompartments.isEmpty() ? "none" : expectedCompartments.join("|")
         row[m + "_compartment_pass"] = compartmentPass ? 1 : 0
         row[m + "_enrichment_pass"] = enrichmentPass ? 1 : 0
         if (c.role == "membrane" || c.role == "cyto") {
@@ -1089,7 +1357,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
           row[m + "_minimum_ring_fraction"] = minFraction
         }
         row[m + "_pattern_pos"] = (fractionPass && connectedPass) ? 1 : 0
-        row[m + "_compartment_consistent"] = c.expectedCompartment == null ? 1 :
+        row[m + "_compartment_consistent"] = expectedCompartments.isEmpty() ? 1 :
                                               (compartmentAssigned ? (compartmentPass ? 1 : 0) : "")
 
         if (intensityPos) {
@@ -1159,7 +1427,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     def dapiQc = buildDapiQc(dapi, region, allNucRois, rejectedNuclei, cfg)
     IJ.saveAs(dapiQc, "PNG", imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__DAPI_QC.png")
     dapiQc.close()
-    panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
+    cellChannels.each { c ->
       def callQc = buildCallDecisionQc(dapi, region, allNucRois,
                                        finalPositiveRois[c.marker], indeterminateRois[c.marker],
                                        c.marker, chThreshSource[c.marker], cfg)
@@ -1176,6 +1444,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     def srow = [ image: sourceStem, panel: panelKey, region: regName,
                  mouse_id: meta.mouse_id, section_id: meta.section_id,
                  genotype: meta.genotype, condition: meta.condition, compartment: compartment,
+                 region_tags: regionTags.join("|"),
                  region_area_um2: regionAreaUm2,
                  dapi_segmentation_method: cfg.dapiMethod,
                  n_nuclei: nuclei.size(),
@@ -1183,7 +1452,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                  n_rejected_below_min_area: rejectedNuclei.count { it.reason == "area_below_minimum" },
                  n_rejected_at_image_edge: rejectedNuclei.count { it.reason == "image_edge" },
                  n_rejected_by_particle_filter: rejectedNuclei.count { it.reason == "particle_filter" } ]
-    panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
+    cellChannels.each { c ->
       // The conventional summary fields follow the authoritative final call.
       // Raw object-mean decisions remain available under explicit audit names.
       srow[c.marker + "_pos_count"] = finalPosCount[c.marker]
@@ -1201,7 +1470,8 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       srow[c.marker + "_morphology_density_per_mm2"] =
         (regionAreaUm2 > 0 ? finalPosCount[c.marker] / (regionAreaUm2/1e6) : 0)
       srow[c.marker + "_true_pos_count"] = finalPosCount[c.marker] // compatibility alias
-      srow[c.marker + "_expected_compartment"] = c.expectedCompartment ?: "none"
+      def expectedForSummary = expectedCompartmentsFor(c)
+      srow[c.marker + "_expected_compartment"] = expectedForSummary.isEmpty() ? "none" : expectedForSummary.join("|")
     }
     areaStats.each { m, as ->
       srow[m + "_positive_area_um2"] = as.area_um2
@@ -1211,16 +1481,21 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       srow[m + "_min_component_area_um2"] = as.min_component_area_um2
       srow[m + "_area_threshold"] = as.threshold
       srow[m + "_area_mode"] = as.mode
-      srow[m + "_area_threshold_source"] = "adaptive_otsu_exploratory"
+      srow[m + "_area_threshold_source"] = as.threshold_source
       def areaChannel = panelDef.channels.find { it.marker == m }
-      if (areaChannel?.expectedCompartment != null &&
+      def areaExpectedCompartments = areaChannel == null ? [] : expectedCompartmentsFor(areaChannel)
+      if (!areaExpectedCompartments.isEmpty() &&
           (compartment == "unassigned" || compartment == "ambiguous")) {
-        srow[m + "_area_call_status"] = "exploratory_compartment_unassigned"
-      } else if (areaChannel?.expectedCompartment != null &&
-                 compartment != areaChannel.expectedCompartment) {
+        srow[m + "_area_call_status"] = as.threshold_source == "fixed_predeclared" ?
+                                         "indeterminate_compartment_unassigned" :
+                                         "exploratory_compartment_unassigned"
+      } else if (!areaExpectedCompartments.isEmpty() &&
+                 !areaExpectedCompartments.any { regionTags.contains(it) }) {
         srow[m + "_area_call_status"] = "wrong_compartment_not_interpretable"
       } else {
-        srow[m + "_area_call_status"] = "exploratory_adaptive_threshold"
+        srow[m + "_area_call_status"] = as.threshold_source == "fixed_predeclared" ?
+                                         "fixed_threshold_area" :
+                                         "exploratory_adaptive_threshold"
       }
       // Keep the historical KRT5 pod fields for downstream compatibility.
       if (as.mode == "pod") {
@@ -1242,7 +1517,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     // save nuclei mask for the region
     saveLabelMask(dapi, allNucRois, imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__nuclei_mask.tif")
     saveLabelMask(dapi, rejectedNuclei.collect { it.roi }, imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__rejected_nuclei_mask.tif")
-    panelDef.channels.findAll { it.role != "nuclear" }.each { c ->
+    cellChannels.each { c ->
       saveLabelMask(dapi, finalPositiveRois[c.marker],
                     imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__" + c.marker + "_morphology_positive_nuclei_mask.tif")
       saveLabelMask(dapi, indeterminateRois[c.marker],
@@ -1256,7 +1531,8 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     String areaMode = c.areaMode ?: "pod"
     String suffix = areaMode == "pod" ? "pod_mask" :
                     (areaMode == "ciliary" ? "ciliary_mask" :
-                     (areaMode == "membrane" ? "membrane_positive_mask" : "reporter_positive_mask"))
+                     (areaMode == "membrane" ? "membrane_positive_mask" :
+                      (areaMode == "reporter" ? "reporter_positive_mask" : "positive_area_mask")))
     IJ.saveAs(mask, "Tiff", imgOut.getAbsolutePath() + "/" + fileKey + "__" + c.marker + "_" + suffix + ".tif")
   }
 
@@ -1287,6 +1563,10 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                           intensity_role: "candidate-pixel threshold and audit field; not final-call authority",
                           fixed_threshold_requirement: "confirmatory calls require predeclared control-derived thresholds" ],
     morphology_rules: cfg.morphologyRules,
+    role_morphology_defaults: cfg.roleMorphologyDefaults,
+    marker_registry: [path:cfg.markerRegistryPath, schema_version:cfg.markerRegistrySchema],
+    custom_panel_config: cfg.panelConfigPath,
+    custom_panel_keys: cfg.customPanelKeys,
     compartment_mode: cfg.compartmentMode,
     whole_field_compartment: cfg.wholeFieldCompartment,
     minimum_ring_positive_fraction: cfg.minRingPosFraction,
@@ -1530,6 +1810,10 @@ def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles:
            podMinArea: POD_MIN_AREA_UM2, podBlur: POD_BLUR_SIGMA_PX, podMethod: POD_THRESH_METHOD,
            sensitivity: POS_SENSITIVITY, fixedThresholds: FIXED_POS_THRESHOLDS,
            morphologyPrimary: MORPHOLOGY_PRIMARY, morphologyRules: MORPHOLOGY_RULES,
+           roleMorphologyDefaults: ROLE_MORPHOLOGY_DEFAULTS,
+           markerRegistryPath: markerRegistryFile.isFile() ? markerRegistryFile.getAbsolutePath() : "unavailable",
+           markerRegistrySchema: MARKER_REGISTRY.schema_version ?: "unavailable",
+           panelConfigPath: PANEL_CONFIG_PATH ?: "built_in_only", customPanelKeys: CUSTOM_PANEL_KEYS,
            minRingPosFraction: MIN_RING_POS_FRACTION, compartmentMode: COMPARTMENT_MODE,
            wholeFieldCompartment: WHOLE_FIELD_COMPARTMENT,
            actubSupportExpandUm: ACTUB_SUPPORT_EXPAND_UM,
@@ -1572,7 +1856,12 @@ def basenameCounts = files.countBy { it.name }
 
 files.each { f ->
   def m = parseMeta(f.name, sheet, PANEL, f.parentFile.absolutePath)
-  def panelKey = (m.panel && PANELS.containsKey(m.panel)) ? m.panel : PANEL
+  String requestedPanel = m.panel == null ? "" : m.panel.toString().trim()
+  def panelKey = (requestedPanel.isEmpty() || requestedPanel == "NA") ? PANEL : requestedPanel
+  if (!PANELS.containsKey(panelKey)) {
+    throw new IllegalArgumentException("Image '" + f.name + "' requests unknown panel '" + panelKey +
+                                       "'. Available panels: " + PANELS.keySet().sort())
+  }
   def panelDef = PANELS[panelKey]
   // Keep Windows paths manageable. The source acquisition name is preserved
   // in params/manifest; output paths use concise, analysis-relevant metadata.

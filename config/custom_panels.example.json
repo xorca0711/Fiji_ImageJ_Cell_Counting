@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0.0",
+  "notes": [
+    "Examples are research templates, not validated biological cutoffs or diagnostic panels.",
+    "Channel idx values must be changed to match the acquisition metadata.",
+    "Copy this file outside the repository, keep only the panels you use, and set IFQ_PANEL_CONFIG to that copy.",
+    "Derive fixed intensity thresholds and morphology settings from study controls before confirmatory analysis."
+  ],
+  "panels": {
+    "ARI_DATP": {
+      "label": "Acute injury alveolar transitional-state research",
+      "channels": [
+        {"idx": 1, "marker": "DAPI", "role": "nuclear", "qcColor": "blue"},
+        {"idx": 2, "marker": "KRT8", "expectedCompartments": ["alveolar"], "qcColor": "red"},
+        {"idx": 3, "marker": "CLDN4", "expectedCompartments": ["alveolar"], "qcColor": "green"},
+        {"idx": 4, "marker": "SFTPC", "expectedCompartments": ["alveolar"], "qcColor": "white"}
+      ],
+      "classify": [
+        {"KRT8": true, "CLDN4": true},
+        {"KRT8": true, "CLDN4": true, "SFTPC": false}
+      ]
+    },
+    "IPF_BASALOID": {
+      "label": "Fibrotic epithelial state research",
+      "channels": [
+        {"idx": 1, "marker": "DAPI", "role": "nuclear", "qcColor": "blue"},
+        {"idx": 2, "marker": "KRT17", "expectedCompartments": ["fibrotic"], "qcColor": "red"},
+        {"idx": 3, "marker": "KRT5", "expectedCompartments": ["fibrotic"], "qcColor": "green"},
+        {"idx": 4, "marker": "TP63", "expectedCompartments": ["fibrotic"], "qcColor": "white"}
+      ],
+      "classify": [
+        {"KRT17": true, "KRT5": false},
+        {"KRT17": true, "TP63": true}
+      ]
+    },
+    "IPF_STROMA": {
+      "label": "Fibrotic stromal and matrix area research",
+      "channels": [
+        {"idx": 1, "marker": "DAPI", "role": "nuclear", "qcColor": "blue"},
+        {"idx": 2, "marker": "CTHRC1", "role": "regional_area", "areaMinAreaUm2": 10.0, "expectedCompartments": ["fibrotic", "stromal"], "qcColor": "red"},
+        {"idx": 3, "marker": "ACTA2", "role": "regional_area", "areaMinAreaUm2": 20.0, "expectedCompartments": ["fibrotic", "stromal"], "qcColor": "green"},
+        {"idx": 4, "marker": "COL1A1", "role": "regional_area", "areaMinAreaUm2": 20.0, "expectedCompartments": ["fibrotic", "stromal"], "qcColor": "white"}
+      ],
+      "classify": []
+    },
+    "LUAD_LINEAGE": {
+      "label": "Pulmonary adenocarcinoma lineage-support research",
+      "channels": [
+        {"idx": 1, "marker": "DAPI", "role": "nuclear", "qcColor": "blue"},
+        {"idx": 2, "marker": "NKX2-1", "expectedCompartments": ["tumor"], "qcColor": "green"},
+        {"idx": 3, "marker": "NAPSA", "expectedCompartments": ["tumor"], "qcColor": "red"},
+        {"idx": 4, "marker": "EPCAM", "expectedCompartments": ["tumor"], "qcColor": "white"}
+      ],
+      "classify": [
+        {"NKX2-1": true, "NAPSA": true},
+        {"NKX2-1": true, "NAPSA": true, "EPCAM": true}
+      ]
+    }
+  }
+}
