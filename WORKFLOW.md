@@ -268,12 +268,19 @@ removed from the environment token: `tdTOM` becomes `IFQ_TDTOM_THRESHOLD` and
 $env:IFQ_INPUT_DIR = 'G:\path\to\originals'
 $env:IFQ_OUTPUT_DIR = "$PWD\analysis_output\run_name"
 $env:IFQ_PANEL = 'E'
+$env:IFQ_SEGMENTER = 'classic'
+$env:IFQ_PROJECTION = 'max'
 $env:IFQ_MARKER_REGISTRY = "$PWD\config\lung_marker_registry.json"
 # For a new study: $env:IFQ_PANEL_CONFIG = 'D:\study\panels.json'
 $env:IFQ_INCLUDE_REGEX = '.*A01_G002_0001.*'
 $env:IFQ_MAX_IMAGES = '1'
 $env:IFQ_MORPHOLOGY_PRIMARY = 'true'
 ```
+
+Use a new, empty output directory for every run. A batch with no matching
+images exits with code 1. Per-image failures are retained in `run_manifest.json`
+and make the final manifest status `partial_failure` or `failed`; headless Fiji
+also exits with code 1 after preserving the partial summary.
 
 Run `IF_Quant_Pipeline.groovy` headlessly or through Fiji's Groovy script editor.
 Every run must retain `run_manifest.json`, per-image `__params.json`, cell CSVs,
@@ -294,8 +301,19 @@ The per-cell CSV includes:
 - `<marker>_true_pos`: compatibility alias for the final call.
 
 The region summary separately reports raw mean-intensity, morphology-positive,
-morphology-negative, indeterminate, and evaluable counts. Classification rules
-use `<marker>_final_call`, never `<marker>_pos`.
+morphology-negative, indeterminate, and evaluable counts. It also exports:
+
+- nucleus-candidate acceptance and rejection fractions, with rejection reasons;
+- marker positive/negative fractions among evaluable cells;
+- marker indeterminate fractions among included nuclei;
+- raw-intensity-positive/final-negative and
+  raw-intensity-negative/final-positive disagreement counts;
+- an intensity-morphology discordance fraction and a review-burden proxy
+  (`indeterminate + discordant`) for longitudinal script QC.
+
+These audit fractions are sensitivity and review-burden proxies, not validated
+false-positive or false-negative rates. Classification rules use
+`<marker>_final_call`, never `<marker>_pos`.
 
 Every marker receives morphology-positive and indeterminate nuclei label masks,
 plus a call-QC PNG with positive nuclei in green, evaluable negatives in cyan,

@@ -158,10 +158,11 @@ Every requested feature maps to the pipeline:
 
 1. **Open the script in Fiji:** `File ▸ New ▸ Script…`, set **Language ▸ Groovy**,
    open `IF_Quant_Pipeline.groovy`.
-2. **Edit the config block** (top of the script):
-   - `INPUT_DIR` — folder of confocal files (`.czi/.lif/.nd2/.oib/.tif…`).
-   - `OUTPUT_DIR` — where results are written.
-   - `PANEL` — default panel if a file has no samplesheet/filename hint.
+2. **Set the `IFQ_*` environment variables before launching Fiji** (preferred),
+   or edit their documented fallbacks at the top of the script:
+   - `IFQ_INPUT_DIR` — folder of original confocal files.
+   - `IFQ_OUTPUT_DIR` — a new, empty run directory.
+   - `IFQ_PANEL` — default panel if a file has no samplesheet/filename hint.
    - For a new acquisition, set `IFQ_PANEL_CONFIG` to a study-owned JSON file
      and confirm its channel `idx` map against Bio-Formats metadata.
 3. **(Recommended) Add metadata.** Copy `samplesheet_template.csv` into
@@ -210,6 +211,9 @@ $env:IFQ_MARKER_REGISTRY = "$PWD\config\lung_marker_registry.json"
 $env:IFQ_RECURSIVE = 'true'
 $env:IFQ_INCLUDE_REGEX = '.*CC10_488.*20x 2k_Cycle.*G001_0001\.oir$'
 $env:IFQ_MAX_IMAGES = '1'            # 0 means all matching files
+$env:IFQ_SEGMENTER = 'classic'
+$env:IFQ_PROJECTION = 'max'           # max | sum | avg | single
+# $env:IFQ_SINGLE_PLANE = '4'         # 1-based index when projection=single
 $env:IFQ_TISSUE_MODE = 'whole_field' # count disconnected DAPI objects across the field
 $env:IFQ_COMPARTMENT_MODE = 'required' # final run: require alveoli/airway ROI names
 $env:IFQ_T1A_THRESHOLD = '887.2'        # example only; freeze from controls
@@ -226,10 +230,15 @@ $env:IFQ_ACTUB_MIN_SUPPORT_FRACTION = '0.02' # exploratory; freeze from controls
 $env:IFQ_ACTUB_MIN_PATCH_AREA_UM2 = '0.5'    # 20x ciliary patch, not one axoneme
 ```
 
+`IFQ_OUTPUT_DIR` must be empty by default, preventing stale masks and cell
+tables from a previous run. Use a new run name; only set
+`IFQ_ALLOW_NONEMPTY_OUTPUT=true` after manually reviewing the existing folder.
+
 The 260719-CW filename convention is recognized automatically: mouse/date,
 condition, section, and panel M/E/R are inferred. A `samplesheet.csv` remains
-authoritative when supplied. Recursive runs add a stable suffix for duplicate
-basenames so `Cycle` and `Cycle_01` data cannot overwrite each other.
+authoritative when supplied. Recursive runs add a stable relative-path suffix
+whenever two files resolve to the same metadata-derived output key, so distinct
+acquisitions cannot overwrite each other.
 Output folders and files use the concise pattern
 `<mouse>_<condition>_<panel>_<section>`; the complete acquisition filename is
 retained in `run_manifest.json` and each `__params.json` file.
@@ -264,10 +273,12 @@ groups are compared; the example values above are not validated cutoffs.
 
 - **Formats:** anything Bio-Formats reads (`.czi`, `.lif`, `.nd2`, `.oir`, `.oib`,
   `.oif`, `.ics`, `.tif/.tiff`). Adjust `FILE_GLOB` to widen/narrow.
-- **Calibration:** must be embedded in the file (µm/pixel, Z-step). The pipeline
-  reads and preserves it; all areas/distances are reported in µm/µm².
+- **Calibration:** must provide positive square-pixel dimensions in micrometres.
+  The pipeline stops instead of silently treating pixels as micrometres.
 - **Metadata resolution order** for each file:
-  1. `samplesheet.csv` row (matched by exact filename) — **preferred**;
+  1. `samplesheet.csv` row matched by `relative_path`, then exact `filename` —
+     **preferred**; `relative_path` is required for duplicate filenames in a
+     recursive input tree;
   2. otherwise a filename token convention `mouseID_condition_panel_section.ext`
      (e.g. `m01_PR8_A_s1.czi`);
   3. otherwise the script defaults (`PANEL`, `genotype = NA`).
@@ -278,15 +289,16 @@ groups are compared; the example values above are not validated cutoffs.
 
 | Parameter | Meaning |
 |---|---|
-| `SEGMENTER` | `"stardist"` (preferred) or `"classic"` watershed |
+| `IFQ_SEGMENTER` | `"stardist"` (preferred) or `"classic"` watershed |
 | `STARDIST_PROB` / `STARDIST_NMS` | detection probability / overlap thresholds |
-| `PROJECTION` | `"max"` (default) · `"sum"` · `"avg"` · `"single"` |
-| `SINGLE_PLANE` | plane index when `PROJECTION="single"` (−1 = middle) |
-| `RING_EXPAND_UM` | perinuclear ring width → cytoplasm/membrane "cell" proxy |
+| `IFQ_PROJECTION` | `"max"` (default), `"sum"`, `"avg"`, or `"single"` |
+| `IFQ_SINGLE_PLANE` | 1-based plane index when projection is `single`; `-1` = middle |
+| `IFQ_RING_EXPAND_UM` | perinuclear ring width for the cytoplasm/membrane proxy |
+| `IFQ_ALLOW_NONEMPTY_OUTPUT` | `false` by default; prevents stale mixed-run exports |
 | `POD_MIN_AREA_UM2` | minimum particle size to count as a KRT5⁺ pod |
 | `POD_THRESH_METHOD` | auto-threshold method for the pod mask (`Otsu`, `Li`, …) |
 | `POS_SENSITIVITY` | per-marker multiplier on the auto threshold (`>1` stricter, `<1` more permissive) |
-| `IFQ_MORPHOLOGY_PRIMARY` | `true` by default; makes the three-state morphology call authoritative |
+| `IFQ_MORPHOLOGY_PRIMARY` | Must remain `true`; `false` is rejected because intensity-only final calls are unsupported |
 | `IFQ_WHOLE_FIELD_COMPARTMENT` | explicit compartment for a visually reviewed homogeneous field: `airway`, `alveolar`, `ambiguous`, or `unassigned` |
 | `IFQ_<MARKER>_THRESHOLD` | fixed control-derived candidate-pixel cutoff for a marker |
 | `IFQ_<MARKER>_MIN_POSITIVE_FRACTION` | minimum fraction of the role-specific support above cutoff |
@@ -338,8 +350,11 @@ biological marker name is used.
 
 **Key `run_summary.csv` columns** (marker columns vary by panel):
 
-- `mouse_id, section_id, genotype, condition, panel, region` — identifiers.
+- `image, output_key, mouse_id, section_id, genotype, condition, panel, region`
+  — identifiers; `output_key` disambiguates repeated acquisition names.
 - `region_area_um2, n_nuclei` — denominators.
+- `n_nucleus_candidates_total`, nucleus acceptance/rejection fractions, and
+  rejection-reason counts — segmentation QC.
 - `<marker>_pos_count`, `<marker>_density_per_mm2` — morphology-authoritative
   positives; `<marker>_raw_mean_pos_count` preserves the legacy intensity audit.
 - `<marker>_pos_threshold` and `<marker>_threshold_source` — resolved cutoff and
@@ -362,6 +377,8 @@ After `aggregate_to_mouse.py` you also get:
 - **`mouse_level_summary.csv`** — one row per (mouse × panel); pod fraction and
   densities are **area-weighted** across that animal's sections
   (`Σ pod_area / Σ tissue_area`, `Σ counts / Σ area`).
+  Generic regional-area endpoints and marker review-burden fractions are pooled
+  from their count/area numerators rather than averaging region percentages.
 - **`group_level_summary.csv`** — mean / sd / **sem** / **n_mice** per
   (genotype × condition × panel × metric). `n_mice` is the real statistical n.
 
@@ -432,8 +449,10 @@ Every run records, so results can be reconstructed exactly:
 
 | Symptom | Fix |
 |---|---|
-| `INPUT_DIR is not a folder` | set `INPUT_DIR`/`OUTPUT_DIR` at the top of the script |
-| `found N channels, panel expects M → skipped` | fix the panel's `idx:`/marker map or the samplesheet `panel` |
-| StarDist errors / not found | install CSBDeep + StarDist update sites, or set `SEGMENTER="classic"` |
+| `INPUT_DIR is not a folder` | set `IFQ_INPUT_DIR` before launching Fiji |
+| `OUTPUT_DIR is not empty` | use a new run directory; do not mix old and new masks/cell tables |
+| `No images matched` | inspect `IFQ_INCLUDE_REGEX`, supported extensions, and recursive mode |
+| `Found N channels but panel references channel M` | fix the panel `idx` map or samplesheet panel; the image is recorded as failed |
+| StarDist errors / not found | install CSBDeep + StarDist update sites, or set `IFQ_SEGMENTER=classic` |
 | All areas look inverted / zero | pipeline forces `blackBackground=true`; if you edited masking, keep foreground = 255 |
 | Densities look 10–100× off | check embedded calibration (µm/pixel) in the source files |

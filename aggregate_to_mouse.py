@@ -58,12 +58,57 @@ def _num(v):
 
 
 def read_rows(path):
-    with open(path, newline="") as fh:
+    with open(path, newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         if reader.fieldnames is None:
             sys.exit(f"ERROR: {path} is empty or has no header.")
         rows = [r for r in reader if any((v or "").strip() for v in r.values())]
     return reader.fieldnames, rows
+
+
+def validate_rows(header, rows):
+    """Fail before aggregation when biological identity or row identity is unsafe."""
+    missing_columns = [c for c in KEY_COLS + ROW_ID_COLS if c not in header]
+    if missing_columns:
+        sys.exit("ERROR: run_summary.csv is missing required columns: " +
+                 ", ".join(missing_columns))
+
+    invalid_mouse_rows = [
+        r for r in rows
+        if (r.get("mouse_id") or "").strip().upper() in {"", "NA", "N/A", "UNKNOWN"}
+    ]
+    if invalid_mouse_rows:
+        examples = ", ".join((r.get("image") or "<unknown>") for r in invalid_mouse_rows[:5])
+        sys.exit(
+            f"ERROR: {len(invalid_mouse_rows)} row(s) lack a valid mouse_id ({examples}). "
+            "Do not aggregate unknown animals into one pseudo-mouse; fix samplesheet.csv first."
+        )
+
+    identities = defaultdict(set)
+    for r in rows:
+        identities[(r.get("mouse_id") or "").strip()].add(
+            ((r.get("genotype") or "NA").strip(), (r.get("condition") or "NA").strip())
+        )
+    conflicts = {mouse: values for mouse, values in identities.items() if len(values) > 1}
+    if conflicts:
+        details = "; ".join(f"{mouse}: {sorted(values)}" for mouse, values in list(conflicts.items())[:5])
+        sys.exit("ERROR: a mouse_id maps to multiple genotype/condition identities: " + details)
+
+    identity_column = "output_key" if "output_key" in header else "image"
+    seen = set()
+    duplicates = []
+    for r in rows:
+        key_columns = [identity_column, "region", "section_id", "panel"]
+        key = tuple((r.get(c) or "").strip() for c in key_columns)
+        if key in seen:
+            duplicates.append(key)
+        seen.add(key)
+    if duplicates:
+        sys.exit(
+            f"ERROR: {len(duplicates)} duplicate output/image-region-section-panel row(s) detected. "
+            "Combine only one run_summary row per analyzed region; rerun old ambiguous summaries "
+            "with a pipeline version that exports output_key."
+        )
 
 
 def classify_columns(header):
@@ -86,6 +131,25 @@ def classify_columns(header):
         and not c.startswith("class_")
     ]
     morphology_evaluable_count = [c for c in header if c.endswith("_morphology_evaluable_count")]
+    marker_audit_count = [
+        c for c in header
+        if c.endswith((
+            "_raw_positive_final_negative_count",
+            "_raw_negative_final_positive_count",
+            "_intensity_morphology_discordant_count",
+            "_review_burden_proxy_count",
+        ))
+    ]
+    nucleus_qc_count = [
+        c for c in header
+        if c in {
+            "n_rejected_nucleus_candidates", "n_rejected_below_min_area",
+            "n_rejected_at_image_edge", "n_rejected_by_particle_filter",
+            "n_nucleus_candidates_total",
+        }
+    ]
+    positive_area = [c for c in header if c.endswith("_positive_area_um2")]
+    n_components = [c for c in header if c.endswith("_n_components")]
     # total pod area only -- exclude the derived per-region MEAN pod size, which
     # also ends in "_pod_area_um2" and would otherwise be summed as an area.
     pod_area = [c for c in header
@@ -102,14 +166,19 @@ def classify_columns(header):
     state_counts = (set(raw_mean_pos_count) | set(morphology_pos_count) |
                     set(morphology_negative_count) | set(marker_indeterminate_count) |
                     set(morphology_evaluable_count) | set(class_evaluable_count) |
-                    set(class_indeterminate_count))
+                    set(class_indeterminate_count) | set(marker_audit_count))
     sum_cols = (set(["region_area_um2", "n_nuclei"]) | set(pos_count) |
-                set(pod_area) | set(n_pods) | set(class_count) | state_counts)
+                set(pod_area) | set(n_pods) | set(class_count) | state_counts |
+                set(nucleus_qc_count) | set(positive_area) | set(n_components))
     # derived columns we recompute (do NOT sum): fractions, densities, mean pod size, thresholds
     return {
         "pos_count": pos_count,
         "raw_mean_pos_count": raw_mean_pos_count,
         "state_counts": sorted(state_counts),
+        "marker_audit_count": marker_audit_count,
+        "nucleus_qc_count": nucleus_qc_count,
+        "positive_area": positive_area,
+        "n_components": n_components,
         "pod_area": pod_area,
         "n_pods": n_pods,
         "class_count": class_count,
@@ -148,6 +217,27 @@ def aggregate_mice(header, rows):
         rec["total_tissue_area_um2"] = total_area_um2
         rec["total_nuclei"] = sums.get("n_nuclei", 0.0)
 
+        # --- nucleus-candidate QC totals and pooled fractions ---
+        for c in cats["nucleus_qc_count"]:
+            rec[f"{c}_total"] = sums[c]
+        candidate_total = sums.get(
+            "n_nucleus_candidates_total",
+            sums.get("n_nuclei", 0.0) + sums.get("n_rejected_nucleus_candidates", 0.0),
+        )
+        rejected_total = sums.get("n_rejected_nucleus_candidates", 0.0)
+        rec["nucleus_candidate_acceptance_fraction"] = (
+            sums.get("n_nuclei", 0.0) / candidate_total if candidate_total > 0 else 0.0
+        )
+        rec["nucleus_candidate_rejection_fraction"] = (
+            rejected_total / candidate_total if candidate_total > 0 else 0.0
+        )
+        for source, target in (
+            ("n_rejected_below_min_area", "rejected_below_min_fraction_of_rejected"),
+            ("n_rejected_at_image_edge", "rejected_edge_fraction_of_rejected"),
+            ("n_rejected_by_particle_filter", "rejected_particle_filter_fraction_of_rejected"),
+        ):
+            rec[target] = sums.get(source, 0.0) / rejected_total if rejected_total > 0 else 0.0
+
         # --- marker positive counts + pooled density ---
         for c in cats["pos_count"]:
             m = marker_of(c, "_pos_count")
@@ -165,6 +255,33 @@ def aggregate_mice(header, rows):
             if c in cats["raw_mean_pos_count"]:
                 continue
             rec[f"{c}_total"] = sums[c]
+
+        # Recompute morphology/QC fractions from pooled counts. Region-level
+        # percentages must never be averaged because region sizes differ.
+        for c in [x for x in header if x.endswith("_morphology_evaluable_count")]:
+            marker = marker_of(c, "_morphology_evaluable_count")
+            evaluable = sums.get(c, 0.0)
+            included = sums.get("n_nuclei", 0.0)
+            positive = sums.get(f"{marker}_morphology_pos_count", 0.0)
+            negative = sums.get(f"{marker}_morphology_negative_count", 0.0)
+            indeterminate = sums.get(f"{marker}_indeterminate_count", 0.0)
+            discordant = sums.get(f"{marker}_intensity_morphology_discordant_count", 0.0)
+            review = sums.get(f"{marker}_review_burden_proxy_count", indeterminate + discordant)
+            rec[f"{marker}_morphology_positive_fraction_of_evaluable"] = positive / evaluable if evaluable > 0 else 0.0
+            rec[f"{marker}_morphology_negative_fraction_of_evaluable"] = negative / evaluable if evaluable > 0 else 0.0
+            rec[f"{marker}_indeterminate_fraction_of_included"] = indeterminate / included if included > 0 else 0.0
+            rec[f"{marker}_intensity_morphology_discordant_fraction_of_evaluable"] = discordant / evaluable if evaluable > 0 else 0.0
+            rec[f"{marker}_review_burden_proxy_fraction_of_included"] = review / included if included > 0 else 0.0
+
+        # --- generic regional area endpoints (AcTub, membranes, reporter, ECM) ---
+        for c in cats["positive_area"]:
+            marker = marker_of(c, "_positive_area_um2")
+            area = sums[c]
+            components = sums.get(f"{marker}_n_components", 0.0)
+            rec[f"{marker}_positive_area_um2_total"] = area
+            rec[f"{marker}_positive_area_fraction"] = area / total_area_um2 if total_area_um2 > 0 else 0.0
+            rec[f"{marker}_n_components_total"] = components
+            rec[f"{marker}_mean_component_area_um2"] = area / components if components > 0 else 0.0
 
         # --- pod area, fraction, count, mean size (per area-marker, e.g. KRT5) ---
         for c in cats["pod_area"]:
@@ -241,7 +358,7 @@ def write_csv(path, rows):
         for c in r:
             if c not in cols:
                 cols.append(c)
-    with open(path, "w", newline="") as fh:
+    with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
         w.writeheader()
         for r in rows:
@@ -262,6 +379,7 @@ def main():
     header, rows = read_rows(args.run_summary)
     if not rows:
         sys.exit("ERROR: no data rows in run_summary.csv")
+    validate_rows(header, rows)
 
     mouse_rows = aggregate_mice(header, rows)
     grp_rows = group_stats(mouse_rows)

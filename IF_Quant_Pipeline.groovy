@@ -110,6 +110,40 @@ def envOr = { String name, String fallback ->
   def value = System.getenv(name)
   return (value == null || value.trim().isEmpty()) ? fallback : value.trim()
 }
+def failRun = { String message, Throwable cause = null ->
+  IJ.log("FATAL: " + message)
+  System.err.println("FATAL: " + message)
+  if (java.awt.GraphicsEnvironment.isHeadless()) System.exit(1)
+  if (cause != null) throw new IllegalStateException(message, cause)
+  throw new IllegalArgumentException(message)
+}
+def envBool = { String name, boolean fallback ->
+  String raw = envOr(name, fallback.toString()).toLowerCase()
+  if (!(raw in ["true", "false"])) {
+    failRun(name + " must be true or false; found '" + raw + "'")
+  }
+  return raw == "true"
+}
+def parseIntSetting = { String name, String raw ->
+  try {
+    return Integer.parseInt(raw)
+  } catch (NumberFormatException t) {
+    failRun(name + " must be an integer; found '" + raw + "'", t)
+  }
+}
+def parseDoubleSetting = { String name, String raw ->
+  try {
+    return Double.parseDouble(raw)
+  } catch (NumberFormatException t) {
+    failRun(name + " must be numeric; found '" + raw + "'", t)
+  }
+}
+def envInt = { String name, int fallback ->
+  parseIntSetting(name, envOr(name, fallback.toString()))
+}
+def envDouble = { String name, double fallback ->
+  parseDoubleSetting(name, envOr(name, fallback.toString()))
+}
 def INPUT_DIR   = envOr("IFQ_INPUT_DIR", new File("ref_images").getAbsolutePath())
 def OUTPUT_DIR  = envOr("IFQ_OUTPUT_DIR", new File("analysis_output").getAbsolutePath())
 def PANEL       = envOr("IFQ_PANEL", "T")
@@ -119,9 +153,10 @@ def PANEL       = envOr("IFQ_PANEL", "T")
 def MARKER_REGISTRY_PATH = envOr("IFQ_MARKER_REGISTRY", new File("config/lung_marker_registry.json").getAbsolutePath())
 def PANEL_CONFIG_PATH = envOr("IFQ_PANEL_CONFIG", "")
 def FILE_GLOB   = ~/(?i).*\.(czi|lif|nd2|oir|oib|oif|ics|tif|tiff)$/
-def RECURSIVE   = envOr("IFQ_RECURSIVE", "false").toBoolean()
+def RECURSIVE   = envBool("IFQ_RECURSIVE", false)
 def INCLUDE_REGEX = envOr("IFQ_INCLUDE_REGEX", ".*")
-def MAX_IMAGES  = Integer.parseInt(envOr("IFQ_MAX_IMAGES", "0")) // 0 = all
+def MAX_IMAGES  = envInt("IFQ_MAX_IMAGES", 0) // 0 = all
+def ALLOW_NONEMPTY_OUTPUT = envBool("IFQ_ALLOW_NONEMPTY_OUTPUT", false)
 def TISSUE_MODE = envOr("IFQ_TISSUE_MODE", "auto").toLowerCase() // auto | whole_field
 def COMPARTMENT_MODE = envOr("IFQ_COMPARTMENT_MODE", "optional").toLowerCase() // optional | required
 // Explicit override for a visually reviewed, anatomically homogeneous field.
@@ -130,7 +165,7 @@ def WHOLE_FIELD_COMPARTMENT = envOr("IFQ_WHOLE_FIELD_COMPARTMENT", "unassigned")
 def ALLOWED_COMPARTMENTS = ["unassigned", "airway", "alveolar", "tumor", "fibrotic",
                             "stromal", "vascular", "immune", "ambiguous"] as Set
 if (!ALLOWED_COMPARTMENTS.contains(WHOLE_FIELD_COMPARTMENT)) {
-  throw new IllegalArgumentException("IFQ_WHOLE_FIELD_COMPARTMENT must be one of " + ALLOWED_COMPARTMENTS)
+  failRun("IFQ_WHOLE_FIELD_COMPARTMENT must be one of " + ALLOWED_COMPARTMENTS)
 }
 def FIXED_POS_THRESHOLDS = [:]
 // Any marker can use a control-derived fixed cutoff via IFQ_<MARKER>_THRESHOLD.
@@ -143,28 +178,28 @@ thresholdMarkers.each { marker ->
   String token = marker.toUpperCase().replaceAll(/[^A-Z0-9]+/, "")
   def rawValue = System.getenv("IFQ_" + token + "_THRESHOLD")
   if (rawValue != null && !rawValue.trim().isEmpty()) {
-    FIXED_POS_THRESHOLDS[marker] = Double.parseDouble(rawValue.trim())
+    FIXED_POS_THRESHOLDS[marker] = parseDoubleSetting("IFQ_" + token + "_THRESHOLD", rawValue.trim())
   }
 }
 def MIN_RING_POS_FRACTION = [
-  "T1A": Double.parseDouble(envOr("IFQ_T1A_MIN_RING_FRACTION", "0.30")),
-  "mRAGE": Double.parseDouble(envOr("IFQ_MRAGE_MIN_RING_FRACTION", "0.30"))
+  "T1A": envDouble("IFQ_T1A_MIN_RING_FRACTION", 0.30d),
+  "mRAGE": envDouble("IFQ_MRAGE_MIN_RING_FRACTION", 0.30d)
 ]
 // Acetylated alpha-tubulin is concentrated in apical motile cilia rather than
 // the perinuclear cytoplasm. At 20x, individual axonemes are not reliably
 // resolvable, so associate thresholded ciliary signal with a nucleus using a
 // wider proximity support zone and report ciliary patches as the primary
 // regional readout. These pilot defaults must still be frozen against controls.
-def ACTUB_SUPPORT_EXPAND_UM = Double.parseDouble(envOr("IFQ_ACTUB_SUPPORT_EXPAND_UM", "6.0"))
-def ACTUB_MIN_SUPPORT_FRACTION = Double.parseDouble(envOr("IFQ_ACTUB_MIN_SUPPORT_FRACTION", "0.10"))
-def ACTUB_MIN_PATCH_AREA_UM2 = Double.parseDouble(envOr("IFQ_ACTUB_MIN_PATCH_AREA_UM2", "2.0"))
+def ACTUB_SUPPORT_EXPAND_UM = envDouble("IFQ_ACTUB_SUPPORT_EXPAND_UM", 6.0d)
+def ACTUB_MIN_SUPPORT_FRACTION = envDouble("IFQ_ACTUB_MIN_SUPPORT_FRACTION", 0.10d)
+def ACTUB_MIN_PATCH_AREA_UM2 = envDouble("IFQ_ACTUB_MIN_PATCH_AREA_UM2", 2.0d)
 
 // Morphology is the authoritative marker call. Intensity thresholds define
 // candidate pixels; a final positive additionally requires role-appropriate
 // coverage, connected spatial support, compartment, and object ownership.
 // Defaults are conservative PILOT values and must be calibrated from blinded
 // positive/negative controls before a final cohort run.
-def MORPHOLOGY_PRIMARY = envOr("IFQ_MORPHOLOGY_PRIMARY", "true").toBoolean()
+def MORPHOLOGY_PRIMARY = envBool("IFQ_MORPHOLOGY_PRIMARY", true)
 // These are geometry-class pilot defaults, not biological truth. Marker-level
 // validated values below take precedence, followed by explicit channel-level
 // overrides from IFQ_PANEL_CONFIG. Unknown markers therefore never need to be
@@ -195,20 +230,20 @@ def MORPHOLOGY_RULES = [
 ]
 MORPHOLOGY_RULES.each { marker, rule ->
   String token = marker.toUpperCase().replaceAll(/[^A-Z0-9]+/, "")
-  rule.minFraction = Double.parseDouble(envOr("IFQ_" + token + "_MIN_POSITIVE_FRACTION", rule.minFraction.toString()))
-  rule.minLargestShare = Double.parseDouble(envOr("IFQ_" + token + "_MIN_LARGEST_COMPONENT_SHARE", rule.minLargestShare.toString()))
+  rule.minFraction = envDouble("IFQ_" + token + "_MIN_POSITIVE_FRACTION", rule.minFraction as double)
+  rule.minLargestShare = envDouble("IFQ_" + token + "_MIN_LARGEST_COMPONENT_SHARE", rule.minLargestShare as double)
   if (rule.containsKey("minNuclearEnrichment")) {
-    rule.minNuclearEnrichment = Double.parseDouble(envOr("IFQ_" + token + "_MIN_NUCLEAR_ENRICHMENT", rule.minNuclearEnrichment.toString()))
+    rule.minNuclearEnrichment = envDouble("IFQ_" + token + "_MIN_NUCLEAR_ENRICHMENT", rule.minNuclearEnrichment as double)
   }
   if (rule.containsKey("minNucCytoRatio")) {
-    rule.minNucCytoRatio = Double.parseDouble(envOr("IFQ_" + token + "_MIN_NUC_CYTO_RATIO", rule.minNucCytoRatio.toString()))
+    rule.minNucCytoRatio = envDouble("IFQ_" + token + "_MIN_NUC_CYTO_RATIO", rule.minNucCytoRatio as double)
   }
 }
 def DAPI_METHOD = envOr("IFQ_DAPI_METHOD", "local_phansalkar").toLowerCase() // local_phansalkar | global_otsu
-def DAPI_BACKGROUND_RADIUS_UM = Double.parseDouble(envOr("IFQ_DAPI_BACKGROUND_RADIUS_UM", "15.0"))
-def DAPI_LOCAL_RADIUS_UM = Double.parseDouble(envOr("IFQ_DAPI_LOCAL_RADIUS_UM", "4.0"))
-def DAPI_BLUR_SIGMA_PX = Double.parseDouble(envOr("IFQ_DAPI_BLUR_SIGMA_PX", "1.0"))
-def DAPI_CONTRAST_SATURATION = Double.parseDouble(envOr("IFQ_DAPI_CONTRAST_SATURATION", "0.35"))
+def DAPI_BACKGROUND_RADIUS_UM = envDouble("IFQ_DAPI_BACKGROUND_RADIUS_UM", 15.0d)
+def DAPI_LOCAL_RADIUS_UM = envDouble("IFQ_DAPI_LOCAL_RADIUS_UM", 4.0d)
+def DAPI_BLUR_SIGMA_PX = envDouble("IFQ_DAPI_BLUR_SIGMA_PX", 1.0d)
+def DAPI_CONTRAST_SATURATION = envDouble("IFQ_DAPI_CONTRAST_SATURATION", 0.35d)
 
 // If present, a samplesheet.csv in INPUT_DIR overrides per-file metadata.
 // Columns: filename,mouse_id,section_id,genotype,condition,panel
@@ -218,18 +253,18 @@ def USE_SAMPLESHEET = true
 // PILOT: forced to "classic". StarDist/CSBDeep are not installed in this Fiji,
 // and TensorFlow has no windows-arm64 native build, so "stardist" cannot run on
 // this machine. Set back to "stardist" on an x86_64 Fiji with the update sites on.
-def SEGMENTER   = "classic"     // "stardist" (preferred) | "classic"
+def SEGMENTER   = envOr("IFQ_SEGMENTER", "classic").toLowerCase() // "stardist" | "classic"
 def STARDIST_PROB = 0.50
 def STARDIST_NMS  = 0.40
 def STARDIST_TILES = 1          // raise (e.g. 4/9) for large images / low RAM
 
 // --- Z handling ---
-def PROJECTION  = "max"         // "max" | "sum" | "avg" | "single"
-def SINGLE_PLANE = -1           // used only when PROJECTION="single"; -1 = middle
+def PROJECTION  = envOr("IFQ_PROJECTION", "max").toLowerCase() // "max" | "sum" | "avg" | "single"
+def SINGLE_PLANE = envInt("IFQ_SINGLE_PLANE", -1) // single only; -1 = middle
 
 // --- Geometry (calibrated, micrometres) ---
-def RING_EXPAND_UM      = 2.0   // perinuclear ring width -> "cell" proxy
-def MIN_NUCLEUS_AREA_UM2 = Double.parseDouble(envOr("IFQ_MIN_NUCLEUS_AREA_UM2", "8.0"))
+def RING_EXPAND_UM      = envDouble("IFQ_RING_EXPAND_UM", 2.0d)
+def MIN_NUCLEUS_AREA_UM2 = envDouble("IFQ_MIN_NUCLEUS_AREA_UM2", 8.0d)
 def POD_MIN_AREA_UM2    = 50.0  // a "pod" particle must exceed this
 def POD_BLUR_SIGMA_PX   = 2.0
 def POD_THRESH_METHOD   = "Otsu" // Otsu|Triangle|Li|Huang|MaxEntropy...
@@ -247,6 +282,48 @@ def POS_SENSITIVITY = [ "KRT5":1.00, "AGER":1.00, "PDPN":1.00, "ProSPC":1.00,
 def TISSUE_BLUR_SIGMA_PX = 4.0
 def TISSUE_THRESH_METHOD  = "Triangle" // permissive, keeps sparse tissue
 def TISSUE_MIN_AREA_UM2   = 2000.0     // drop debris specks
+
+def requireFiniteNonnegative = { String name, double value, boolean allowZero = true ->
+  if (!Double.isFinite(value) || value < 0.0d || (!allowZero && value == 0.0d)) {
+    failRun(name + " must be a finite " +
+      (allowZero ? "non-negative" : "positive") + " number; found " + value)
+  }
+}
+if (!(SEGMENTER in ["classic", "stardist"])) {
+  failRun("IFQ_SEGMENTER must be classic or stardist; found '" + SEGMENTER + "'")
+}
+if (!(PROJECTION in ["max", "sum", "avg", "single"])) {
+  failRun("IFQ_PROJECTION must be max, sum, avg, or single; found '" + PROJECTION + "'")
+}
+if (!(DAPI_METHOD in ["local_phansalkar", "global_otsu"])) {
+  failRun("IFQ_DAPI_METHOD must be local_phansalkar or global_otsu; found '" + DAPI_METHOD + "'")
+}
+if (!(TISSUE_MODE in ["auto", "whole_field"])) {
+  failRun("IFQ_TISSUE_MODE must be auto or whole_field; found '" + TISSUE_MODE + "'")
+}
+if (!(COMPARTMENT_MODE in ["optional", "required"])) {
+  failRun("IFQ_COMPARTMENT_MODE must be optional or required; found '" + COMPARTMENT_MODE + "'")
+}
+if (SINGLE_PLANE == 0 || SINGLE_PLANE < -1) {
+  failRun("IFQ_SINGLE_PLANE must be -1 (middle) or a positive 1-based Z index")
+}
+if (MAX_IMAGES < 0) {
+  failRun("IFQ_MAX_IMAGES must be 0 (all) or a positive integer")
+}
+if (!MORPHOLOGY_PRIMARY) {
+  failRun("IFQ_MORPHOLOGY_PRIMARY=false is unsupported: intensity defines candidate pixels, but morphology must authorize the final call")
+}
+requireFiniteNonnegative("IFQ_RING_EXPAND_UM", RING_EXPAND_UM, false)
+requireFiniteNonnegative("IFQ_MIN_NUCLEUS_AREA_UM2", MIN_NUCLEUS_AREA_UM2, false)
+requireFiniteNonnegative("IFQ_ACTUB_SUPPORT_EXPAND_UM", ACTUB_SUPPORT_EXPAND_UM, false)
+requireFiniteNonnegative("IFQ_ACTUB_MIN_PATCH_AREA_UM2", ACTUB_MIN_PATCH_AREA_UM2, false)
+requireFiniteNonnegative("IFQ_DAPI_BACKGROUND_RADIUS_UM", DAPI_BACKGROUND_RADIUS_UM, false)
+requireFiniteNonnegative("IFQ_DAPI_LOCAL_RADIUS_UM", DAPI_LOCAL_RADIUS_UM, false)
+requireFiniteNonnegative("IFQ_DAPI_BLUR_SIGMA_PX", DAPI_BLUR_SIGMA_PX, true)
+if (!Double.isFinite(DAPI_CONTRAST_SATURATION) ||
+    DAPI_CONTRAST_SATURATION < 0.0d || DAPI_CONTRAST_SATURATION > 100.0d) {
+  failRun("IFQ_DAPI_CONTRAST_SATURATION must be between 0 and 100; found " + DAPI_CONTRAST_SATURATION)
+}
 
 // ============================================================================
 //  2. PANEL DEFINITIONS  (channel idx is 1-based ACQUISITION order)
@@ -375,7 +452,7 @@ if (markerRegistryFile.isFile()) {
     }
     MARKER_REGISTRY = parsed
   } catch (Throwable t) {
-    throw new IllegalArgumentException("Cannot parse IFQ_MARKER_REGISTRY '" + markerRegistryFile + "': " + t.message, t)
+    failRun("Cannot parse IFQ_MARKER_REGISTRY '" + markerRegistryFile + "': " + t.message, t)
   }
 } else {
   IJ.log("Marker registry not found; explicit channel roles remain fully supported: " + markerRegistryFile)
@@ -396,34 +473,34 @@ def CUSTOM_PANEL_KEYS = []
 if (PANEL_CONFIG_PATH != null && !PANEL_CONFIG_PATH.trim().isEmpty()) {
   def panelConfigFile = new File(PANEL_CONFIG_PATH)
   if (!panelConfigFile.isFile()) {
-    throw new IllegalArgumentException("IFQ_PANEL_CONFIG is not a file: " + panelConfigFile)
+    failRun("IFQ_PANEL_CONFIG is not a file: " + panelConfigFile)
   }
   def customDoc
   try {
     customDoc = new JsonSlurper().parse(panelConfigFile)
   } catch (Throwable t) {
-    throw new IllegalArgumentException("Cannot parse IFQ_PANEL_CONFIG '" + panelConfigFile + "': " + t.message, t)
+    failRun("Cannot parse IFQ_PANEL_CONFIG '" + panelConfigFile + "': " + t.message, t)
   }
   if (!(customDoc instanceof Map) || !(customDoc.panels instanceof Map) || customDoc.panels.isEmpty()) {
-    throw new IllegalArgumentException("IFQ_PANEL_CONFIG must contain a non-empty 'panels' object")
+    failRun("IFQ_PANEL_CONFIG must contain a non-empty 'panels' object")
   }
   customDoc.panels.each { rawKey, rawPanel ->
     String panelKey = rawKey.toString()
     if (!(panelKey ==~ /[A-Za-z0-9][A-Za-z0-9_.-]*/)) {
-      throw new IllegalArgumentException("Invalid custom panel key: " + panelKey)
+      failRun("Invalid custom panel key: " + panelKey)
     }
     if (PANELS.containsKey(panelKey)) {
-      throw new IllegalArgumentException("Custom panel key would replace a built-in panel: " + panelKey)
+      failRun("Custom panel key would replace a built-in panel: " + panelKey)
     }
     if (!(rawPanel instanceof Map)) {
-      throw new IllegalArgumentException("Custom panel '" + panelKey + "' must be an object")
+      failRun("Custom panel '" + panelKey + "' must be an object")
     }
     if (!(rawPanel.channels instanceof Collection) || rawPanel.channels.isEmpty()) {
-      throw new IllegalArgumentException("Custom panel '" + panelKey + "' needs a non-empty channels array")
+      failRun("Custom panel '" + panelKey + "' needs a non-empty channels array")
     }
     def channels = rawPanel.channels.collect { rawChannel ->
       if (!(rawChannel instanceof Map)) {
-        throw new IllegalArgumentException("Every channel in panel '" + panelKey + "' must be an object")
+        failRun("Every channel in panel '" + panelKey + "' must be an object")
       }
       def c = [:]
       c.putAll(rawChannel)
@@ -452,63 +529,63 @@ def ALLOWED_CHANNEL_ROLES = ["nuclear", "cyto", "membrane", "nuc_marker",
                              "nuc_ratio", "apical_cilia", "regional_area"] as Set
 PANELS.each { panelKey, panelDef ->
   if (!(panelDef.channels instanceof Collection) || panelDef.channels.isEmpty()) {
-    throw new IllegalArgumentException("Panel '" + panelKey + "' has no channels")
+    failRun("Panel '" + panelKey + "' has no channels")
   }
   panelDef.channels.each { c ->
     if (c.idx == null || (c.idx as int) < 1) {
-      throw new IllegalArgumentException("Panel '" + panelKey + "' has an invalid channel idx")
+      failRun("Panel '" + panelKey + "' has an invalid channel idx")
     }
     if (c.marker == null || c.marker.toString().trim().isEmpty()) {
-      throw new IllegalArgumentException("Panel '" + panelKey + "' has a channel without a marker")
+      failRun("Panel '" + panelKey + "' has a channel without a marker")
     }
     if (c.role == null || !ALLOWED_CHANNEL_ROLES.contains(c.role.toString())) {
-      throw new IllegalArgumentException("Panel '" + panelKey + "', marker '" + c.marker +
-                                         "' needs one of roles " + ALLOWED_CHANNEL_ROLES)
+      failRun("Panel '" + panelKey + "', marker '" + c.marker +
+              "' needs one of roles " + ALLOWED_CHANNEL_ROLES)
     }
     if (c.role == "regional_area") {
       c.cellCall = false
       c.areaMarker = true
       if (c.areaMode == null) c.areaMode = "generic"
       if (c.areaMinAreaUm2 == null) {
-        throw new IllegalArgumentException("Area-only marker '" + c.marker + "' in panel '" + panelKey +
-                                           "' needs areaMinAreaUm2; no universal biological size cutoff exists")
+        failRun("Area-only marker '" + c.marker + "' in panel '" + panelKey +
+                "' needs areaMinAreaUm2; no universal biological size cutoff exists")
       }
     }
     ["minPositiveFraction", "minLargestComponentShare"].each { field ->
       if (c[field] != null && (((double)c[field]) < 0.0d || ((double)c[field]) > 1.0d)) {
-        throw new IllegalArgumentException(field + " must be between 0 and 1 for marker '" + c.marker + "'")
+        failRun(field + " must be between 0 and 1 for marker '" + c.marker + "'")
       }
     }
   }
   def indexes = panelDef.channels.collect { it.idx as int }
   if (indexes.unique().size() != indexes.size()) {
-    throw new IllegalArgumentException("Panel '" + panelKey + "' repeats a channel idx")
+    failRun("Panel '" + panelKey + "' repeats a channel idx")
   }
   def markerNames = panelDef.channels.collect { it.marker.toString() }
   if (markerNames.unique().size() != markerNames.size()) {
-    throw new IllegalArgumentException("Panel '" + panelKey + "' repeats a marker name")
+    failRun("Panel '" + panelKey + "' repeats a marker name")
   }
   if (panelDef.channels.count { it.role == "nuclear" } != 1) {
-    throw new IllegalArgumentException("Panel '" + panelKey + "' must contain exactly one nuclear segmentation channel")
+    failRun("Panel '" + panelKey + "' must contain exactly one nuclear segmentation channel")
   }
   def callableMarkers = panelDef.channels.findAll { it.role != "nuclear" && it.cellCall != false }
                                         .collect { it.marker.toString() } as Set
   (panelDef.classify ?: []).each { classRule ->
     if (!(classRule instanceof Map) || classRule.isEmpty()) {
-      throw new IllegalArgumentException("Panel '" + panelKey + "' contains an empty classification rule")
+      failRun("Panel '" + panelKey + "' contains an empty classification rule")
     }
     classRule.each { marker, wanted ->
       if (!callableMarkers.contains(marker.toString())) {
-        throw new IllegalArgumentException("Panel '" + panelKey + "' classifies unavailable/area-only marker '" + marker + "'")
+        failRun("Panel '" + panelKey + "' classifies unavailable/area-only marker '" + marker + "'")
       }
       if (!(wanted instanceof Boolean)) {
-        throw new IllegalArgumentException("Classification values must be true/false in panel '" + panelKey + "'")
+        failRun("Classification values must be true/false in panel '" + panelKey + "'")
       }
     }
   }
 }
 if (!PANELS.containsKey(PANEL)) {
-  throw new IllegalArgumentException("IFQ_PANEL '" + PANEL + "' is unknown. Available panels: " + PANELS.keySet().sort())
+  failRun("IFQ_PANEL '" + PANEL + "' is unknown. Available panels: " + PANELS.keySet().sort())
 }
 
 // Extend thresholds and morphology rules to every marker that appears in any
@@ -521,13 +598,13 @@ allAnalysisChannels.each { c ->
   String token = normalizeMarkerToken(marker)
   def rawThreshold = System.getenv("IFQ_" + token + "_THRESHOLD")
   if (rawThreshold != null && !rawThreshold.trim().isEmpty()) {
-    FIXED_POS_THRESHOLDS[marker] = Double.parseDouble(rawThreshold.trim())
+    FIXED_POS_THRESHOLDS[marker] = parseDoubleSetting("IFQ_" + token + "_THRESHOLD", rawThreshold.trim())
   }
   if (!POS_SENSITIVITY.containsKey(marker)) POS_SENSITIVITY[marker] = 1.0d
   if (c.cellCall != false && !MORPHOLOGY_RULES.containsKey(marker)) {
     def roleRule = ROLE_MORPHOLOGY_DEFAULTS[c.role]
     if (roleRule == null) {
-      throw new IllegalArgumentException("No cell-call morphology defaults for role '" + c.role + "'")
+      failRun("No cell-call morphology defaults for role '" + c.role + "'")
     }
     MORPHOLOGY_RULES[marker] = new LinkedHashMap(roleRule)
   }
@@ -535,13 +612,32 @@ allAnalysisChannels.each { c ->
 // Apply environment overrides after custom markers have been registered.
 MORPHOLOGY_RULES.each { marker, rule ->
   String token = normalizeMarkerToken(marker)
-  rule.minFraction = Double.parseDouble(envOr("IFQ_" + token + "_MIN_POSITIVE_FRACTION", rule.minFraction.toString()))
-  rule.minLargestShare = Double.parseDouble(envOr("IFQ_" + token + "_MIN_LARGEST_COMPONENT_SHARE", rule.minLargestShare.toString()))
+  rule.minFraction = envDouble("IFQ_" + token + "_MIN_POSITIVE_FRACTION", rule.minFraction as double)
+  rule.minLargestShare = envDouble("IFQ_" + token + "_MIN_LARGEST_COMPONENT_SHARE", rule.minLargestShare as double)
   if (rule.containsKey("minNuclearEnrichment")) {
-    rule.minNuclearEnrichment = Double.parseDouble(envOr("IFQ_" + token + "_MIN_NUCLEAR_ENRICHMENT", rule.minNuclearEnrichment.toString()))
+    rule.minNuclearEnrichment = envDouble("IFQ_" + token + "_MIN_NUCLEAR_ENRICHMENT", rule.minNuclearEnrichment as double)
   }
   if (rule.containsKey("minNucCytoRatio")) {
-    rule.minNucCytoRatio = Double.parseDouble(envOr("IFQ_" + token + "_MIN_NUC_CYTO_RATIO", rule.minNucCytoRatio.toString()))
+    rule.minNucCytoRatio = envDouble("IFQ_" + token + "_MIN_NUC_CYTO_RATIO", rule.minNucCytoRatio as double)
+  }
+  [minFraction:rule.minFraction, minLargestShare:rule.minLargestShare].each { field, value ->
+    double v = value as double
+    if (!Double.isFinite(v) || v < 0.0d || v > 1.0d) {
+      failRun(marker + " " + field + " must be between 0 and 1; found " + value)
+    }
+  }
+  [minNuclearEnrichment:rule.minNuclearEnrichment, minNucCytoRatio:rule.minNucCytoRatio]
+    .findAll { field, value -> value != null }.each { field, value ->
+      double v = value as double
+      if (!Double.isFinite(v) || v <= 0.0d) {
+        failRun(marker + " " + field + " must be finite and positive; found " + value)
+      }
+    }
+}
+FIXED_POS_THRESHOLDS.each { marker, value ->
+  double v = value as double
+  if (!Double.isFinite(v) || v < 0.0d) {
+    failRun("Fixed threshold for " + marker + " must be finite and non-negative; found " + value)
   }
 }
 
@@ -566,7 +662,16 @@ def captureVersions() {
 //  4. HELPERS
 // ============================================================================
 
-def ensureDir(String p) { def d = new File(p); if (!d.exists()) d.mkdirs(); return d }
+def ensureDir(String p) {
+  def d = new File(p)
+  if (d.exists() && !d.isDirectory()) {
+    throw new IOException("Output path exists but is not a directory: " + d)
+  }
+  if (!d.exists() && !d.mkdirs()) {
+    throw new IOException("Cannot create output directory: " + d)
+  }
+  return d
+}
 
 // Headless-safe replacement for Analyze Particles + ROI Manager. When an ROI
 // is present, clear pixels outside it first: ParticleAnalyzer only honors the
@@ -711,6 +816,15 @@ def bfOpen(String path) {
   opts.setVirtual(false)
   opts.setAutoscale(false)
   def imps = BF.openImagePlus(opts)
+  if (imps == null || imps.length == 0) {
+    throw new IOException("Bio-Formats returned no image series for: " + path)
+  }
+  if (imps.length != 1) {
+    imps.each { if (it != null) { it.changes = false; it.close() } }
+    throw new IllegalArgumentException("Bio-Formats found " + imps.length +
+      " series in '" + new File(path).name + "'. This pipeline requires one series per file; " +
+      "split the acquisition or add an explicit series-selection policy before quantification.")
+  }
   return imps[0]
 }
 
@@ -719,6 +833,10 @@ def projectChannel(ImagePlus ch, String projection, int singlePlane) {
   if (ch.getNSlices() <= 1) return ch
   if (projection == "single") {
     int z = (singlePlane >= 1) ? singlePlane : (int)Math.ceil(ch.getNSlices()/2.0)
+    if (z < 1 || z > ch.getNSlices()) {
+      throw new IllegalArgumentException("Requested IFQ_SINGLE_PLANE=" + z +
+        " but channel '" + ch.getTitle() + "' has " + ch.getNSlices() + " Z planes")
+    }
     ch.setSlice(z)
     def ip = ch.getProcessor().duplicate()
     def out = new ImagePlus(ch.getTitle(), ip)
@@ -912,6 +1030,11 @@ def buildThresholdMask(ImagePlus ch, double blurSigma, String method, Double fix
     IJ.setAutoThreshold(dup, method + " dark")
     thr = dup.getProcessor().getMinThreshold()   // raw intensity, -1 if unset
   }
+  if (!Double.isFinite(thr) || thr < 0.0d) {
+    dup.close()
+    throw new IllegalStateException("Could not resolve a valid " + method +
+      " threshold for channel '" + ch.getTitle() + "'")
+  }
   IJ.run(dup, "Convert to Mask", "")
   dup.setCalibration(ch.getCalibration())
   dup.setProperty("thresholdValue", thr)
@@ -959,8 +1082,42 @@ def resolveTissueRois(String imgPath, ImagePlus dapi, cfg) {
   def hit = candidates.find { it.exists() }
   if (hit != null) {
     def rois = readRoiFile(hit)
+    if (rois.isEmpty()) {
+      throw new IllegalArgumentException("Manual ROI file contains no readable .roi entries: " + hit)
+    }
     def named = []
-    rois.eachWithIndex { r, i -> named << [name: (r.getName() ?: ("region" + (i+1))), roi: r] }
+    rois.eachWithIndex { r, i ->
+      def bounds = r.getBounds()
+      if (bounds == null || bounds.width <= 0 || bounds.height <= 0 ||
+          bounds.x < 0 || bounds.y < 0 || bounds.x + bounds.width > dapi.getWidth() ||
+          bounds.y + bounds.height > dapi.getHeight()) {
+        throw new IllegalArgumentException("ROI '" + (r.getName() ?: (i + 1)) +
+          "' is empty or extends outside image bounds in " + hit.name)
+      }
+      named << [name: (r.getName() ?: ("region" + (i+1))), roi: r]
+    }
+    def duplicateNames = named.groupBy { it.name }.findAll { name, entries -> entries.size() > 1 }.keySet()
+    if (!duplicateNames.isEmpty()) {
+      throw new IllegalArgumentException("ROI names must be unique within " + hit.name +
+        "; duplicates: " + duplicateNames.sort())
+    }
+    for (int i = 0; i < named.size(); i++) {
+      for (int j = i + 1; j < named.size(); j++) {
+        def overlap = new ShapeRoi(named[i].roi).and(new ShapeRoi(named[j].roi))
+        def ob = overlap.getBounds()
+        boolean hasArea = false
+        for (int y = ob.y; !hasArea && y < ob.y + ob.height; y++) {
+          for (int x = ob.x; x < ob.x + ob.width; x++) {
+            if (overlap.contains(x, y)) { hasArea = true; break }
+          }
+        }
+        if (hasArea) {
+          throw new IllegalArgumentException("Manual ROIs overlap and would double-count cells: '" +
+            named[i].name + "' and '" + named[j].name + "' in " + hit.name +
+            ". Encode multiple context tags in one ROI name instead.")
+        }
+      }
+    }
     return [source: hit.name, regions: named]
   }
   if (cfg.tissueMode == "whole_field") {
@@ -972,8 +1129,10 @@ def resolveTissueRois(String imgPath, ImagePlus dapi, cfg) {
   IJ.run(mask, "Options...", "iterations=2 count=1 do=Close")
   def rois = particlesToRois(mask, cfg.tissueMinArea, false)
   mask.close()
-  if (rois.isEmpty()) {  // fall back to whole field
-    return [source: "whole_field", regions: [[name: "tissue", roi: new Roi(0, 0, dapi.getWidth(), dapi.getHeight())]]]
+  if (rois.isEmpty()) {
+    throw new IllegalStateException("Automatic DAPI tissue detection found no region. " +
+      "Review the DAPI channel/settings or explicitly set IFQ_TISSUE_MODE=whole_field; " +
+      "the pipeline will not silently analyze the complete background field.")
   }
   // merge all particles into one "tissue" region
   ShapeRoi merged = null
@@ -983,8 +1142,12 @@ def resolveTissueRois(String imgPath, ImagePlus dapi, cfg) {
 
 // Nucleus ROIs within a given tissue region.
 def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
-  ImagePlus crop = dapi.duplicate()
-  crop.setRoi(region)
+  // Keep full-image coordinates. ImagePlus.duplicate() crops when an ROI is
+  // active; inheriting that cropped coordinate system made non-whole-field ROI
+  // masks and returned nuclei spatially inconsistent with the source image.
+  ImagePlus crop = new ImagePlus(dapi.getTitle() + "_segmentation_work",
+                                 dapi.getProcessor().duplicate())
+  crop.setCalibration(dapi.getCalibration())
   if (cfg.segmenter == "stardist") {
     // StarDist's ROI Manager output is interactive-only. Keep it isolated from
     // the classic path so classic segmentation remains fully headless-safe.
@@ -1008,7 +1171,9 @@ def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
   } else {
     // Classic/local-threshold watershed fallback. The local mode is intended
     // for uneven DAPI illumination and is fully recorded in params.json.
-    def m = crop.duplicate()
+    def m = new ImagePlus(crop.getTitle() + "_binary_work",
+                          crop.getProcessor().duplicate())
+    m.setCalibration(dapi.getCalibration())
     if (cfg.dapiMethod == "local_phansalkar") {
       double px = Math.max(dapi.getCalibration().pixelWidth, 1.0e-9d)
       int backgroundRadiusPx = Math.max(3, (int)Math.round(cfg.dapiBackgroundRadiusUm / px))
@@ -1065,7 +1230,8 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
   def imgOut = ensureDir(outDir + "/" + outputKey)
   def fileSafe = { value ->
     def s = (value == null || value.toString().trim().isEmpty()) ? "NA" : value.toString().trim()
-    return s.replaceAll(/[^A-Za-z0-9._-]+/, "-").replaceAll(/^-+|-+$/, "")
+    def cleaned = s.replaceAll(/[^A-Za-z0-9._-]+/, "-").replaceAll(/^-+|-+$/, "")
+    return cleaned.isEmpty() ? "NA" : cleaned
   }
   // Use the marker map as the per-image filename prefix. The containing
   // directory already identifies the specimen, so avoiding that duplication
@@ -1075,21 +1241,39 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
   }.join("_")
   def fileKey = channelSignature
 
-  def raw = bfOpen(imgPath)
+  ImagePlus raw = null
+  def channels = []
+  def markerImg = [:]
+  def areaMasks = [:]
+  def transientImages = []
+  try {
+  raw = bfOpen(imgPath)
   Calibration cal = raw.getCalibration()
+  String calibrationUnit = (cal.getUnit() ?: "").toLowerCase()
+  boolean micrometreUnit = calibrationUnit in ["um", "µm", "μm", "micron", "microns", "micrometer", "micrometers"]
+  if (!Double.isFinite(cal.pixelWidth) || !Double.isFinite(cal.pixelHeight) ||
+      cal.pixelWidth <= 0.0d || cal.pixelHeight <= 0.0d || !micrometreUnit) {
+    throw new IllegalArgumentException("Image calibration must provide positive micrometre pixel dimensions; found " +
+      cal.pixelWidth + " x " + cal.pixelHeight + " " + cal.getUnit() + " in " + new File(imgPath).name)
+  }
+  double pixelAspectDifference = Math.abs(cal.pixelWidth - cal.pixelHeight) /
+                                 Math.max(cal.pixelWidth, cal.pixelHeight)
+  if (pixelAspectDifference > 0.01d) {
+    throw new IllegalArgumentException("Perinuclear ROI enlargement assumes square pixels; found " +
+      cal.pixelWidth + " x " + cal.pixelHeight + " um in " + new File(imgPath).name)
+  }
   // Channel maps may intentionally skip an unused acquisition channel. The
   // highest referenced index, not the number of mapped channels, defines the
   // minimum acquisition size.
   def nChExpected = panelDef.channels.collect { it.idx as int }.max()
-  def channels = ChannelSplitter.split(raw)
+  channels = ChannelSplitter.split(raw)
   if (channels.length < nChExpected) {
-    IJ.log("  WARNING: found " + channels.length + " channels, panel expects " + nChExpected + " -> skipped")
-    raw.close()
-    return null
+    throw new IllegalArgumentException("Found " + channels.length +
+      " channels but panel '" + panelKey + "' references channel " + nChExpected)
   }
 
   // Map marker -> projected 2D channel image
-  def markerImg = [:]
+  markerImg = [:]
   def nuclearMarker = null
   panelDef.channels.each { c ->
     def ch = channels[c.idx - 1]
@@ -1118,7 +1302,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
 
   // Pre-build marker-specific area masks. The minimum component area is applied
   // to the saved mask itself so reported area and component counts agree.
-  def areaMasks = [:]
+  areaMasks = [:]
   def areaThresholdSources = [:]
   panelDef.channels.findAll { it.areaMarker }.each { c ->
     double areaBlur = c.containsKey("areaBlurSigmaPx") ? (double)c.areaBlurSigmaPx : cfg.podBlur
@@ -1127,8 +1311,10 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     boolean fixedAreaThreshold = cfg.fixedThresholds.containsKey(c.marker)
     Double resolvedAreaThreshold = fixedAreaThreshold ? (double)cfg.fixedThresholds[c.marker] : null
     def rawAreaMask = buildThresholdMask(markerImg[c.marker], areaBlur, areaMethod, resolvedAreaThreshold)
+    transientImages << rawAreaMask
     areaMasks[c.marker] = filterBinaryMaskByArea(rawAreaMask, minArea)
-    areaThresholdSources[c.marker] = fixedAreaThreshold ? "fixed_predeclared" : "adaptive_otsu_exploratory"
+    areaThresholdSources[c.marker] = fixedAreaThreshold ? "fixed_predeclared" :
+      ("adaptive_" + areaMethod.toLowerCase().replaceAll(/[^a-z0-9]+/, "_") + "_exploratory")
     rawAreaMask.close()
   }
 
@@ -1139,6 +1325,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
   tissue.regions.eachWithIndex { reg, ri ->
     def region = reg.roi
     def regName = reg.name
+    def regFileToken = fileSafe(regName)
     def regionLower = regName.toLowerCase()
     def regionTags = []
     if (regionLower.contains("alveol")) regionTags << "alveolar"
@@ -1162,6 +1349,9 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     }
     def regStat = measureRoi(dapi, region)   // area of region
     double regionAreaUm2 = regStat.area
+    if (!Double.isFinite(regionAreaUm2) || regionAreaUm2 <= 0.0d) {
+      throw new IllegalArgumentException("Analysis ROI '" + regName + "' has zero or invalid calibrated area")
+    }
 
     // per-marker channel thresholds inside THIS region (adaptive)
     def chThresh = [:]
@@ -1179,6 +1369,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     def qcMasks = [:]
     nonNuclearChannels.each { c ->
       qcMasks[c.marker] = buildMaskAtThreshold(markerImg[c.marker], chThresh[c.marker])
+      transientImages << qcMasks[c.marker]
     }
 
     // ---- Marker-positive area/components (pods, reporter fields, ciliary patches) ----
@@ -1191,6 +1382,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       // Particle analysis is intentionally mode-specific: large KRT5 pods,
       // reporter-positive cell/clusters, or subcellular ciliary patches.
       def maskReg = mask.duplicate(); maskReg.setCalibration(cal); maskReg.setRoi(region)
+      transientImages << maskReg
       def componentRois = particlesToRois(maskReg, minComponentArea, false)
       def componentAreas = componentRois.collect { measureRoi(mask, it).area }
       def areaThr = mask.getProperty("thresholdValue")
@@ -1206,12 +1398,18 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
 
     // ---- Nuclei -> cells ----
     def segmentation = segmentNuclei(dapi, region, cfg)
+    if (segmentation.candidateMask != null) transientImages << segmentation.candidateMask
     def nuclei = segmentation.included
     def rejectedNuclei = segmentation.rejected ?: []
     def posCount = [:].withDefault { 0 }
     def finalPosCount = [:].withDefault { 0 }
     def finalNegCount = [:].withDefault { 0 }
     def indeterminateCount = [:].withDefault { 0 }
+    // Audit how often legacy mean intensity and the morphology-authoritative
+    // final call disagree. These are sensitivity/QC counters, not ground-truth
+    // false-positive or false-negative labels.
+    def rawPosFinalNegCount = [:].withDefault { 0 }
+    def rawNegFinalPosCount = [:].withDefault { 0 }
     def classCount = [:].withDefault { 0 }
     def classEvaluableCount = [:].withDefault { 0 }
     def allNucRois = []
@@ -1221,7 +1419,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     nuclei.eachWithIndex { nuc, ni ->
       allNucRois << nuc
       def cellRoi = RoiEnlarger.enlarge(nuc, (int)Math.round(cfg.ringExpandUm / cal.pixelWidth))
-      def row = [ image: sourceStem, panel: panelKey, region: regName,
+      def row = [ image: sourceStem, output_key: outputKey, panel: panelKey, region: regName,
                   compartment: compartment, region_tags: regionTags.join("|"), cell_id: (ni + 1) ]
       row.mouse_id = meta.mouse_id; row.section_id = meta.section_id
       row.genotype = meta.genotype; row.condition = meta.condition
@@ -1318,9 +1516,9 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                                   (compartmentAssigned && expectedCompartments.any { regionTags.contains(it) })
         boolean evaluable = supportStats.total > 0 && projectionValid
         def indeterminateReasons = []
-        if (!expectedCompartments.isEmpty() && !compartmentAssigned) {
+        if (!expectedCompartments.isEmpty() && !compartmentPass) {
           evaluable = false
-          indeterminateReasons << "compartment_unassigned"
+          indeterminateReasons << (compartmentAssigned ? "wrong_compartment" : "compartment_unassigned")
         }
         if (!ownershipClear) {
           evaluable = false
@@ -1371,7 +1569,6 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
         if (!fractionPass) failureReasons << "insufficient_spatial_coverage"
         if (!connectedPass) failureReasons << "fragmented_spatial_pattern"
         if (!enrichmentPass) failureReasons << (c.role == "nuc_ratio" ? "nuc_cyto_ratio_below_minimum" : "nuclear_enrichment_below_minimum")
-        if (!compartmentPass && compartmentAssigned) failureReasons << "wrong_compartment"
 
         if (!cfg.morphologyPrimary) {
           finalCall = intensityPos ? 1 : 0
@@ -1390,8 +1587,10 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
         if (finalCall == 1) {
           finalPosCount[m] = finalPosCount[m] + 1
           finalPositiveRois[m] << nuc
+          if (!intensityPos) rawNegFinalPosCount[m] = rawNegFinalPosCount[m] + 1
         } else if (finalCall == 0) {
           finalNegCount[m] = finalNegCount[m] + 1
+          if (intensityPos) rawPosFinalNegCount[m] = rawPosFinalNegCount[m] + 1
         } else {
           indeterminateRois[m] << nuc
         }
@@ -1422,36 +1621,49 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
 
     // ---- QC overlay for this region ----
     def qc = buildQcOverlay(markerImg, panelDef, region, allNucRois, qcMasks)
-    def qcPath = imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__QC.png"
+    transientImages << qc
+    def qcPath = imgOut.getAbsolutePath() + "/" + fileKey + "__" + regFileToken + "__QC.png"
     IJ.saveAs(qc, "PNG", qcPath); qc.close()
     def dapiQc = buildDapiQc(dapi, region, allNucRois, rejectedNuclei, cfg)
-    IJ.saveAs(dapiQc, "PNG", imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__DAPI_QC.png")
+    transientImages << dapiQc
+    IJ.saveAs(dapiQc, "PNG", imgOut.getAbsolutePath() + "/" + fileKey + "__" + regFileToken + "__DAPI_QC.png")
     dapiQc.close()
     cellChannels.each { c ->
       def callQc = buildCallDecisionQc(dapi, region, allNucRois,
-                                       finalPositiveRois[c.marker], indeterminateRois[c.marker],
-                                       c.marker, chThreshSource[c.marker], cfg)
-      IJ.saveAs(callQc, "PNG", imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__" + c.marker + "_CALL_QC.png")
+                                        finalPositiveRois[c.marker], indeterminateRois[c.marker],
+                                        c.marker, chThreshSource[c.marker], cfg)
+      transientImages << callQc
+      IJ.saveAs(callQc, "PNG", imgOut.getAbsolutePath() + "/" + fileKey + "__" + regFileToken + "__" + c.marker + "_CALL_QC.png")
       callQc.close()
     }
     if (segmentation.candidateMask != null) {
       IJ.saveAs(segmentation.candidateMask, "Tiff",
-                imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__DAPI_candidate_mask.tif")
+                imgOut.getAbsolutePath() + "/" + fileKey + "__" + regFileToken + "__DAPI_candidate_mask.tif")
       segmentation.candidateMask.close()
     }
 
     // ---- region summary row ----
-    def srow = [ image: sourceStem, panel: panelKey, region: regName,
+    def nucleusCandidateTotal = nuclei.size() + rejectedNuclei.size()
+    def rejectedBelowMin = rejectedNuclei.count { it.reason == "area_below_minimum" }
+    def rejectedAtEdge = rejectedNuclei.count { it.reason == "image_edge" }
+    def rejectedByParticle = rejectedNuclei.count { it.reason == "particle_filter" }
+    def srow = [ image: sourceStem, output_key: outputKey, panel: panelKey, region: regName,
                  mouse_id: meta.mouse_id, section_id: meta.section_id,
                  genotype: meta.genotype, condition: meta.condition, compartment: compartment,
                  region_tags: regionTags.join("|"),
                  region_area_um2: regionAreaUm2,
-                 dapi_segmentation_method: cfg.dapiMethod,
-                 n_nuclei: nuclei.size(),
-                 n_rejected_nucleus_candidates: rejectedNuclei.size(),
-                 n_rejected_below_min_area: rejectedNuclei.count { it.reason == "area_below_minimum" },
-                 n_rejected_at_image_edge: rejectedNuclei.count { it.reason == "image_edge" },
-                 n_rejected_by_particle_filter: rejectedNuclei.count { it.reason == "particle_filter" } ]
+                  dapi_segmentation_method: cfg.dapiMethod,
+                  n_nuclei: nuclei.size(),
+                  n_rejected_nucleus_candidates: rejectedNuclei.size(),
+                  n_rejected_below_min_area: rejectedBelowMin,
+                  n_rejected_at_image_edge: rejectedAtEdge,
+                  n_rejected_by_particle_filter: rejectedByParticle,
+                  n_nucleus_candidates_total: nucleusCandidateTotal,
+                  nucleus_candidate_acceptance_fraction: (nucleusCandidateTotal > 0 ? nuclei.size() / (double)nucleusCandidateTotal : 0),
+                  nucleus_candidate_rejection_fraction: (nucleusCandidateTotal > 0 ? rejectedNuclei.size() / (double)nucleusCandidateTotal : 0),
+                  rejected_below_min_fraction_of_rejected: (!rejectedNuclei.isEmpty() ? rejectedBelowMin / (double)rejectedNuclei.size() : 0),
+                  rejected_edge_fraction_of_rejected: (!rejectedNuclei.isEmpty() ? rejectedAtEdge / (double)rejectedNuclei.size() : 0),
+                  rejected_particle_filter_fraction_of_rejected: (!rejectedNuclei.isEmpty() ? rejectedByParticle / (double)rejectedNuclei.size() : 0) ]
     cellChannels.each { c ->
       // The conventional summary fields follow the authoritative final call.
       // Raw object-mean decisions remain available under explicit audit names.
@@ -1466,7 +1678,24 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       srow[c.marker + "_morphology_pos_count"] = finalPosCount[c.marker]
       srow[c.marker + "_morphology_negative_count"] = finalNegCount[c.marker]
       srow[c.marker + "_indeterminate_count"] = indeterminateCount[c.marker]
-      srow[c.marker + "_morphology_evaluable_count"] = finalPosCount[c.marker] + finalNegCount[c.marker]
+      def evaluableCount = finalPosCount[c.marker] + finalNegCount[c.marker]
+      def discordantCount = rawPosFinalNegCount[c.marker] + rawNegFinalPosCount[c.marker]
+      def reviewBurdenCount = indeterminateCount[c.marker] + discordantCount
+      srow[c.marker + "_morphology_evaluable_count"] = evaluableCount
+      srow[c.marker + "_morphology_positive_fraction_of_evaluable"] =
+        (evaluableCount > 0 ? finalPosCount[c.marker] / (double)evaluableCount : 0)
+      srow[c.marker + "_morphology_negative_fraction_of_evaluable"] =
+        (evaluableCount > 0 ? finalNegCount[c.marker] / (double)evaluableCount : 0)
+      srow[c.marker + "_indeterminate_fraction_of_included"] =
+        (!nuclei.isEmpty() ? indeterminateCount[c.marker] / (double)nuclei.size() : 0)
+      srow[c.marker + "_raw_positive_final_negative_count"] = rawPosFinalNegCount[c.marker]
+      srow[c.marker + "_raw_negative_final_positive_count"] = rawNegFinalPosCount[c.marker]
+      srow[c.marker + "_intensity_morphology_discordant_count"] = discordantCount
+      srow[c.marker + "_intensity_morphology_discordant_fraction_of_evaluable"] =
+        (evaluableCount > 0 ? discordantCount / (double)evaluableCount : 0)
+      srow[c.marker + "_review_burden_proxy_count"] = reviewBurdenCount
+      srow[c.marker + "_review_burden_proxy_fraction_of_included"] =
+        (!nuclei.isEmpty() ? reviewBurdenCount / (double)nuclei.size() : 0)
       srow[c.marker + "_morphology_density_per_mm2"] =
         (regionAreaUm2 > 0 ? finalPosCount[c.marker] / (regionAreaUm2/1e6) : 0)
       srow[c.marker + "_true_pos_count"] = finalPosCount[c.marker] // compatibility alias
@@ -1515,13 +1744,13 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     qcMasks.each { k, v -> v.close() }
 
     // save nuclei mask for the region
-    saveLabelMask(dapi, allNucRois, imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__nuclei_mask.tif")
-    saveLabelMask(dapi, rejectedNuclei.collect { it.roi }, imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__rejected_nuclei_mask.tif")
+    saveLabelMask(dapi, allNucRois, imgOut.getAbsolutePath() + "/" + fileKey + "__" + regFileToken + "__nuclei_mask.tif")
+    saveLabelMask(dapi, rejectedNuclei.collect { it.roi }, imgOut.getAbsolutePath() + "/" + fileKey + "__" + regFileToken + "__rejected_nuclei_mask.tif")
     cellChannels.each { c ->
       saveLabelMask(dapi, finalPositiveRois[c.marker],
-                    imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__" + c.marker + "_morphology_positive_nuclei_mask.tif")
+                    imgOut.getAbsolutePath() + "/" + fileKey + "__" + regFileToken + "__" + c.marker + "_morphology_positive_nuclei_mask.tif")
       saveLabelMask(dapi, indeterminateRois[c.marker],
-                    imgOut.getAbsolutePath() + "/" + fileKey + "__" + regName + "__" + c.marker + "_indeterminate_nuclei_mask.tif")
+                    imgOut.getAbsolutePath() + "/" + fileKey + "__" + regFileToken + "__" + c.marker + "_indeterminate_nuclei_mask.tif")
     }
   }
 
@@ -1575,17 +1804,31 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     rejected_nucleus_rules: [minimum_area_um2: cfg.minNucArea, exclude_image_edge: true],
     channel_map: panelDef.channels
   ]
-  new File(imgOut, fileKey + "__params.json").text = JsonOutput.prettyPrint(JsonOutput.toJson(params))
+  new File(imgOut, fileKey + "__params.json").setText(
+    JsonOutput.prettyPrint(JsonOutput.toJson(params)), "UTF-8")
 
   // write per-image cell CSV
   writeCsv(cellRows, imgOut.getAbsolutePath() + "/" + fileKey + "__cells.csv")
 
-  // cleanup
-  markerImg.each { k, v -> v.close() }
-  areaMasks.each { k, v -> v.close() }
-  raw.close()
   return [summary: summaryRows, cells: cellRows.size(), tissue_source: tissue.source,
           channel_signature: channelSignature]
+  } finally {
+    // Z projection creates new images while leaving the split stacks open.
+    // Close every object by identity on success, early return, or exception so
+    // one bad field cannot exhaust memory and corrupt the remainder of a batch.
+    def seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap())
+    def resources = []
+    resources.addAll(markerImg.values())
+    resources.addAll(areaMasks.values())
+    resources.addAll(transientImages)
+    resources.addAll(channels ?: [])
+    if (raw != null) resources << raw
+    resources.findAll { it != null }.each { imp ->
+      if (seen.add(imp)) {
+        try { imp.changes = false; imp.close() } catch (Throwable ignored) { }
+      }
+    }
+  }
 }
 
 // ============================================================================
@@ -1722,7 +1965,7 @@ def saveLabelMask(ImagePlus ref, nucRois, String path) {
 }
 
 def writeCsv(rows, String path) {
-  if (rows == null || rows.isEmpty()) { new File(path).text = ""; return }
+  if (rows == null || rows.isEmpty()) { new File(path).setText("", "UTF-8"); return }
   def cols = [] as LinkedHashSet
   rows.each { r -> cols.addAll(r.keySet()) }
   cols = cols as List
@@ -1732,19 +1975,53 @@ def writeCsv(rows, String path) {
     sb.append(cols.collect { c ->
       def v = r.containsKey(c) ? r[c] : ""
       def s = (v == null) ? "" : v.toString()
-      (s.contains(",") || s.contains("\"")) ? "\"" + s.replace("\"", "\"\"") + "\"" : s
+      (s.contains(",") || s.contains("\"") || s.contains("\r") || s.contains("\n")) ?
+        "\"" + s.replace("\"", "\"\"") + "\"" : s
     }.join(",")).append("\n")
   }
-  new File(path).text = sb.toString()
+  new File(path).setText(sb.toString(), "UTF-8")
 }
 
 // ============================================================================
 //  7. SAMPLESHEET / METADATA
 // ============================================================================
 
-def parseMeta(String fname, sheet, defaultPanel, String sourceContext = "") {
+def parseCsvLine(String line) {
+  def values = []
+  def field = new StringBuilder()
+  boolean quoted = false
+  for (int i = 0; i < line.length(); i++) {
+    char ch = line.charAt(i)
+    if (ch == '"' as char) {
+      if (quoted && i + 1 < line.length() && line.charAt(i + 1) == ('"' as char)) {
+        field.append('"'); i++
+      } else {
+        quoted = !quoted
+      }
+    } else if (ch == (',' as char) && !quoted) {
+      values << field.toString(); field.setLength(0)
+    } else {
+      field.append(ch)
+    }
+  }
+  if (quoted) throw new IllegalArgumentException("Unclosed quoted field in samplesheet.csv line: " + line)
+  values << field.toString()
+  return values
+}
+
+def parseMeta(String fname, sheet, defaultPanel, String sourceContext = "", String relativePath = "") {
   // sheet: map filename -> [mouse_id, section_id, genotype, condition, panel]
-  if (sheet != null && sheet.containsKey(fname)) return sheet[fname]
+  if (sheet != null) {
+    String normalizedRelative = relativePath.replace('\\', '/')
+    if (!normalizedRelative.isEmpty() && sheet.byRelative.containsKey(normalizedRelative)) {
+      return sheet.byRelative[normalizedRelative]
+    }
+    if (sheet.ambiguousFilenames.contains(fname)) {
+      throw new IllegalArgumentException("samplesheet.csv contains duplicate filename '" + fname +
+        "'. Add a relative_path value for each duplicate and run with IFQ_RECURSIVE=true.")
+    }
+    if (sheet.byFilename.containsKey(fname)) return sheet.byFilename[fname]
+  }
   // fallback: try token convention mouseID_condition_panel_section.ext
   def stem = fname.replaceFirst(/\.[^.]+$/, "")
   // 260719-CW convention. Use the parent path as context because stitched
@@ -1774,20 +2051,41 @@ def loadSamplesheet(String dir) {
   if (!f.exists()) return null
   def lines = f.readLines()
   if (lines.isEmpty()) return null
-  def header = lines[0].split(",").collect { it.trim() }
+  def header = parseCsvLine(lines[0]).collect { it.trim() }
+  if (!header.isEmpty()) header[0] = header[0].replace("\uFEFF", "")
   def idx = { name -> header.indexOf(name) }
-  def map = [:]
+  if (idx("filename") < 0 && idx("relative_path") < 0) {
+    throw new IllegalArgumentException("samplesheet.csv needs a filename or relative_path column")
+  }
+  def byFilename = [:]
+  def byRelative = [:]
+  def ambiguousFilenames = [] as Set
   lines.drop(1).each { ln ->
     if (ln.trim().isEmpty() || ln.trim().startsWith("#")) return   // skip blanks + comments
-    def p = ln.split(",")
-    def get = { n -> def i = idx(n); (i >= 0 && i < p.length) ? p[i].trim() : "NA" }
+    def p = parseCsvLine(ln)
+    def get = { n -> def i = idx(n); (i >= 0 && i < p.size()) ? p[i].trim() : "NA" }
     def fn = get("filename")
-    if (fn == null || fn.isEmpty() || fn == "NA") return
-    map[fn] = [ mouse_id: get("mouse_id"), section_id: get("section_id"),
-                genotype: get("genotype"), condition: get("condition"),
-                panel: get("panel") ]
+    def relative = get("relative_path").replace('\\', '/')
+    if ((fn == null || fn.isEmpty() || fn == "NA") &&
+        (relative == null || relative.isEmpty() || relative == "NA")) return
+    def meta = [ mouse_id: get("mouse_id"), section_id: get("section_id"),
+                 genotype: get("genotype"), condition: get("condition"), panel: get("panel") ]
+    if (relative != null && !relative.isEmpty() && relative != "NA") {
+      if (byRelative.containsKey(relative)) {
+        throw new IllegalArgumentException("samplesheet.csv repeats relative_path '" + relative + "'")
+      }
+      byRelative[relative] = meta
+    }
+    if (fn != null && !fn.isEmpty() && fn != "NA") {
+      if (byFilename.containsKey(fn)) {
+        ambiguousFilenames << fn
+        byFilename.remove(fn)
+      } else if (!ambiguousFilenames.contains(fn)) {
+        byFilename[fn] = meta
+      }
+    }
   }
-  return map
+  return [byFilename:byFilename, byRelative:byRelative, ambiguousFilenames:ambiguousFilenames]
 }
 
 // ============================================================================
@@ -1799,7 +2097,15 @@ def loadSamplesheet(String dir) {
 // prefs and silently corrupt every area/count. Recorded in provenance below.
 Prefs.blackBackground = true
 
-ensureDir(OUTPUT_DIR)
+def outputRoot
+try { outputRoot = ensureDir(OUTPUT_DIR) }
+catch (Throwable t) { failRun("Cannot prepare OUTPUT_DIR='" + OUTPUT_DIR + "': " + t.message, t) }
+def existingOutputEntries = outputRoot.listFiles() ?: [] as File[]
+if (!ALLOW_NONEMPTY_OUTPUT && existingOutputEntries.length > 0) {
+  failRun("OUTPUT_DIR is not empty: " + OUTPUT_DIR +
+    ". Use a new run directory to prevent stale masks/cell tables, or explicitly set " +
+    "IFQ_ALLOW_NONEMPTY_OUTPUT=true after reviewing the existing contents.")
+}
 def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles: STARDIST_TILES,
            dapiMethod: DAPI_METHOD, dapiBackgroundRadiusUm: DAPI_BACKGROUND_RADIUS_UM,
            dapiLocalRadiusUm: DAPI_LOCAL_RADIUS_UM, dapiBlurSigmaPx: DAPI_BLUR_SIGMA_PX,
@@ -1820,79 +2126,107 @@ def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles:
            actubMinSupportFraction: ACTUB_MIN_SUPPORT_FRACTION,
            actubMinPatchAreaUm2: ACTUB_MIN_PATCH_AREA_UM2,
            tissueMode: TISSUE_MODE, tissueBlur: TISSUE_BLUR_SIGMA_PX,
-           tissueMethod: TISSUE_THRESH_METHOD, tissueMinArea: TISSUE_MIN_AREA_UM2 ]
+           tissueMethod: TISSUE_THRESH_METHOD, tissueMinArea: TISSUE_MIN_AREA_UM2,
+           allowNonemptyOutput: ALLOW_NONEMPTY_OUTPUT ]
 
 def versions = captureVersions()
 IJ.log("ImageJ " + versions.imagej_version + " | Bio-Formats " + versions.bioformats_version)
 
 def inDir = new File(INPUT_DIR)
 if (!inDir.isDirectory()) {
-  IJ.error("INPUT_DIR is not a folder:\n" + INPUT_DIR +
-           "\nEdit INPUT_DIR / OUTPUT_DIR at the top of the script.")
-  return
+  failRun("INPUT_DIR is not a folder: " + INPUT_DIR +
+    ". Set IFQ_INPUT_DIR before launching Fiji or edit the documented fallback.")
 }
 
-def sheet = USE_SAMPLESHEET ? loadSamplesheet(INPUT_DIR) : null
+def sheet
+try { sheet = USE_SAMPLESHEET ? loadSamplesheet(INPUT_DIR) : null }
+catch (Throwable t) { failRun("Cannot load samplesheet.csv: " + t.message, t) }
 
 def listed = []
 if (RECURSIVE) inDir.eachFileRecurse { f -> if (f.isFile()) listed << f }
 else listed = (inDir.listFiles() ?: [] as File[]).toList()
-def includePattern = ~/(?i)${INCLUDE_REGEX}/
+def includePattern
+try { includePattern = ~/(?i)${INCLUDE_REGEX}/ }
+catch (Throwable t) { failRun("Invalid IFQ_INCLUDE_REGEX='" + INCLUDE_REGEX + "': " + t.message, t) }
 def files = listed.findAll { it.isFile() && (it.name ==~ FILE_GLOB) && (it.getAbsolutePath() ==~ includePattern) }
                   .sort { it.getAbsolutePath() }
 if (MAX_IMAGES > 0) files = files.take(MAX_IMAGES)
 IJ.log("Found " + files.size() + " image(s).")
-if (files.isEmpty()) IJ.log("  (nothing matched FILE_GLOB in INPUT_DIR)")
+if (files.isEmpty()) {
+  failRun("No images matched INPUT_DIR='" + INPUT_DIR +
+    "', IFQ_INCLUDE_REGEX='" + INCLUDE_REGEX + "', and the supported image extensions")
+}
 
 def masterSummary = []
 def manifest = [ run_timestamp: versions.timestamp, versions: versions, config: cfg,
-                 input_dir: INPUT_DIR, output_dir: OUTPUT_DIR, recursive: RECURSIVE,
-                 include_regex: INCLUDE_REGEX, max_images: MAX_IMAGES, images: [] ]
+                  input_dir: INPUT_DIR, output_dir: OUTPUT_DIR, recursive: RECURSIVE,
+                  include_regex: INCLUDE_REGEX, max_images: MAX_IMAGES,
+                  status: "running", success_count: 0, failure_count: 0, images: [] ]
 
-// Duplicate basenames occur in folders such as Cycle and Cycle_01. Give only
-// duplicates a stable parent-path suffix so a recursive run cannot overwrite
-// an earlier image's output directory.
-def basenameCounts = files.countBy { it.name }
+def safeToken = { value ->
+  def s = (value == null || value.toString().trim().isEmpty()) ? "NA" : value.toString().trim()
+  def cleaned = s.replaceAll(/[^A-Za-z0-9._-]+/, "-").replaceAll(/^-+|-+$/, "")
+  return cleaned.isEmpty() ? "NA" : cleaned
+}
+def usedOutputKeys = [] as Set
+def failures = []
 
 files.each { f ->
-  def m = parseMeta(f.name, sheet, PANEL, f.parentFile.absolutePath)
-  String requestedPanel = m.panel == null ? "" : m.panel.toString().trim()
-  def panelKey = (requestedPanel.isEmpty() || requestedPanel == "NA") ? PANEL : requestedPanel
-  if (!PANELS.containsKey(panelKey)) {
-    throw new IllegalArgumentException("Image '" + f.name + "' requests unknown panel '" + panelKey +
-                                       "'. Available panels: " + PANELS.keySet().sort())
-  }
-  def panelDef = PANELS[panelKey]
-  // Keep Windows paths manageable. The source acquisition name is preserved
-  // in params/manifest; output paths use concise, analysis-relevant metadata.
-  def safeToken = { value ->
-    def s = (value == null || value.toString().trim().isEmpty()) ? "NA" : value.toString().trim()
-    return s.replaceAll(/[^A-Za-z0-9._-]+/, "-").replaceAll(/^-+|-+$/, "")
-  }
-  def baseStem = [m.mouse_id, m.condition, panelKey, m.section_id].collect { safeToken(it) }.join("_")
-  def outputKey = (basenameCounts[f.name] > 1) ?
-                  baseStem + "__" + Integer.toHexString(f.parentFile.absolutePath.hashCode()) : baseStem
+  def relativePath = inDir.toPath().relativize(f.toPath()).toString()
+  def panelKey = PANEL
+  def outputKey = null
   try {
-    def res = processImage(f.getAbsolutePath(), outputKey, panelKey, panelDef, m, cfg, OUTPUT_DIR)
-    if (res != null) {
-      masterSummary.addAll(res.summary)
-      manifest.images << [ file: f.name, relative_path: inDir.toPath().relativize(f.toPath()).toString(),
-                           output_key: outputKey, panel: panelKey, channel_signature: res.channel_signature,
-                           tissue_source: res.tissue_source, n_cells: res.cells ]
+    def m = parseMeta(f.name, sheet, PANEL, f.parentFile.absolutePath, relativePath)
+    String requestedPanel = m.panel == null ? "" : m.panel.toString().trim()
+    panelKey = (requestedPanel.isEmpty() || requestedPanel == "NA") ? PANEL : requestedPanel
+    if (!PANELS.containsKey(panelKey)) {
+      throw new IllegalArgumentException("Image '" + f.name + "' requests unknown panel '" + panelKey +
+                                         "'. Available panels: " + PANELS.keySet().sort())
     }
+    def panelDef = PANELS[panelKey]
+    // Metadata, not the source filename, defines the readable output key. If
+    // two distinct files resolve to the same metadata tuple, append a stable
+    // relative-path hash instead of allowing the second image to overwrite the
+    // first image's masks, cells, and parameters.
+    def baseStem = [m.mouse_id, m.condition, panelKey, m.section_id].collect { safeToken(it) }.join("_")
+    outputKey = baseStem
+    if (usedOutputKeys.contains(outputKey)) {
+      outputKey = baseStem + "__" + Integer.toHexString(relativePath.replace('\\', '/').hashCode())
+      int collisionIndex = 2
+      while (usedOutputKeys.contains(outputKey)) {
+        outputKey = baseStem + "__" + Integer.toHexString(relativePath.replace('\\', '/').hashCode()) + "_" + collisionIndex++
+      }
+    }
+    usedOutputKeys << outputKey
+    def res = processImage(f.getAbsolutePath(), outputKey, panelKey, panelDef, m, cfg, OUTPUT_DIR)
+    masterSummary.addAll(res.summary)
+    manifest.success_count = manifest.success_count + 1
+    manifest.images << [ file: f.name, relative_path: relativePath, output_key: outputKey,
+                         panel: panelKey, status: "success", channel_signature: res.channel_signature,
+                         tissue_source: res.tissue_source, n_cells: res.cells ]
   } catch (Throwable t) {
     IJ.log("  ERROR on " + f.name + ": " + t)
     def sw = new java.io.StringWriter(); t.printStackTrace(new java.io.PrintWriter(sw)); IJ.log(sw.toString())
-    manifest.images << [ file: f.name, panel: panelKey, error: t.getMessage() ]
+    manifest.failure_count = manifest.failure_count + 1
+    failures << f.name
+    manifest.images << [ file: f.name, relative_path: relativePath, output_key: outputKey,
+                         panel: panelKey, status: "failed", error: t.getMessage() ]
   }
 }
 
 // master summary + manifest
+manifest.status = failures.isEmpty() ? "complete" : (manifest.success_count > 0 ? "partial_failure" : "failed")
 writeCsv(masterSummary, OUTPUT_DIR + "/run_summary.csv")
-new File(OUTPUT_DIR, "run_manifest.json").text = JsonOutput.prettyPrint(JsonOutput.toJson(manifest))
+new File(OUTPUT_DIR, "run_manifest.json").setText(
+  JsonOutput.prettyPrint(JsonOutput.toJson(manifest)), "UTF-8")
 
-IJ.log("DONE. Wrote run_summary.csv and run_manifest.json to " + OUTPUT_DIR)
+IJ.log("DONE. Wrote run_summary.csv and run_manifest.json to " + OUTPUT_DIR +
+       " | success=" + manifest.success_count + " failure=" + manifest.failure_count)
 IJ.log("Reminder: aggregate run_summary.csv to MOUSE level before stats (n = mice, not sections).")
+if (!failures.isEmpty()) {
+  failRun("Batch completed with " + failures.size() +
+    " failed image(s): " + failures.join(", ") + ". See run_manifest.json and the Fiji log.")
+}
 
 // ImageJ starts non-daemon UI/event threads even with --headless. Exit after
 // synchronous exports so command-line and cluster jobs do not hang at DONE.

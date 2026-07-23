@@ -7,6 +7,8 @@
   for acute injury, IPF/fibrosis, and lung-adenocarcinoma lineage studies.
 - [`PILOT_G002_MORPHOLOGY_RESULTS.md`](PILOT_G002_MORPHOLOGY_RESULTS.md): validated one-image results for panel E
   and panel R, including post-run improvements and caveats.
+- [`SCRIPT_SELF_REVIEW_20260723.md`](SCRIPT_SELF_REVIEW_20260723.md): software-defect audit,
+  corrections, verification evidence, and unresolved validation limits.
 - [`../WORKFLOW.md`](../WORKFLOW.md): concise current operational workflow.
 - [`../README.md`](../README.md): installation, configuration, output schema,
   and statistics.

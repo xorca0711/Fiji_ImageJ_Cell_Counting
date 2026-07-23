@@ -1,4 +1,4 @@
-filename,mouse_id,section_id,genotype,condition,panel
+filename,mouse_id,section_id,genotype,condition,panel,relative_path
 # Place this file (renamed to samplesheet.csv) in INPUT_DIR to override per-file metadata.
 # One row per image file. Lines beginning with '#' are ignored.
 #   filename   : exact image file name as it appears in INPUT_DIR (e.g. m01_PR8_A_s1.czi)
@@ -7,7 +7,8 @@ filename,mouse_id,section_id,genotype,condition,panel
 #   genotype   : WT | Het | KO      (IFN-gamma allele status)
 #   condition  : PR8 | naive        (infection state; add timepoint if needed e.g. PR8_d21)
 #   panel      : A | B | C | D | P | S | S2   (see README panel legend)
-m01_PR8_A_s1.czi,m01,s1,KO,PR8,A
+#   relative_path: optional path below INPUT_DIR; required to distinguish duplicate filenames in recursive runs
+m01_PR8_A_s1.czi,m01,s1,KO,PR8,A,
 m01_PR8_A_s2.czi,m01,s2,KO,PR8,A
 m01_PR8_A_s3.czi,m01,s3,KO,PR8,A
 m01_PR8_B_s1.czi,m01,s1,KO,PR8,B
