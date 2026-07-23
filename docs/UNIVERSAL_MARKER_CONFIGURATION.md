@@ -54,16 +54,32 @@ region, or a tumor. The context and co-markers change the interpretation.
 | Role | Primary support | Suitable examples | Main limitation |
 |---|---|---|---|
 | `nuclear` | DAPI/Hoechst nucleus | DAPI | Segmentation only |
-| `nuc_marker` | Connected DAPI-nuclear signal plus enrichment | TP63, FOXJ1, NKX2-1, FOXP3 | Projection and nuclear segmentation |
+| `nuc_marker` | Connected DAPI-nuclear signal plus enrichment | TP63, SOX9, Ki-67/MKI67, FOXJ1, NKX2-1, FOXP3 | Projection and nuclear segmentation |
 | `nuc_ratio` | Nuclear support plus cytoplasmic reference | YAP | Single plane or validated 3D workflow |
 | `cyto` | Nucleus-associated cytoplasmic ring | KRT5, KRT8, SFTPC, SCGB1A1, NAPSA | Approximate cell boundary |
-| `membrane` | Local thin/circumferential support | AGER, PDPN, CLDN4, EPCAM, CD31 | Shared boundaries can be indeterminate |
+| `membrane` | Local thin/circumferential support | AGER, PDPN, CLDN4, EPCAM, ITGA2, PDGFRB, CD31 | Shared boundaries and long stromal processes can be indeterminate |
 | `apical_cilia` | Apical ciliary patch/support | Acetylated tubulin, TUBB4A | Regional patch area is primary at modest resolution |
-| `regional_area` | Independent connected positive-area mask | COL1A1, CTHRC1, ACTA2, secreted mucins | Not a per-cell identity call |
+| `regional_area` | Independent connected positive-area mask | COL1A1, CTHRC1, ACTA2, PDGFRB at 20x, secreted mucins | Not a per-cell identity call |
 
 Unknown markers can be used without editing Groovy source when the panel JSON
 declares one of these roles. Registry membership is a convenience, not a
 whitelist.
+
+### Operational profiles for KRT8, ITGA2, PDGFRB, SOX9, Red2-Kras, pan-KRAS, and Ki-67
+
+| Marker | Default role | Primary morphology | Interpretation boundary |
+|---|---|---|---|
+| KRT8 | `cyto` | Connected extranuclear/perinuclear filament support | Positivity is broad epithelial expression; a KRT8-high transitional state additionally needs a frozen abundance rule, alveolar/fibrotic geography, and co-markers |
+| ITGA2/CD49b | `membrane` | Connected membrane-support coverage; assay-dependent cytoplasmic staining is retained only as an audit measurement | Not lineage-specific; require the intended epithelial, tumor, stromal, or immune ROI and co-markers |
+| PDGFRB/CD140b | `membrane` when cell ownership is validated; otherwise `regional_area` | Perivascular/stromal connected signal and spatial relationship to vessels | PDGFRB alone does not establish pericyte or myofibroblast identity; regional area is preferred at 20x |
+| SOX9 | `nuc_marker` | Connected DAPI-nuclear support plus nuclear:ring enrichment | Cytoplasmic-only staining is not positive; developmental, injury, fibrotic, or tumor meaning requires geography and co-markers |
+| Red2-KrasG12D RFP | `cyto` plus `areaMarker: true` in the study panel | Connected RFP reporter support; filtered RFP-positive clone area is primary at 20x | RFP-positive marks the oncogene-coupled clone after model/induction verification; RFP-negative alone is not wild type |
+| KRAS | `cyto` | Connected nucleus-associated cytoplasmic/inner-membrane protein support | Pan-KRAS staining cannot establish a mutation or allele; mutant-specific claims require allele-specific validation against genotyping |
+| Ki-67/MKI67 | `nuc_marker` | Connected DAPI-nuclear support plus enrichment, using a lower coverage gate for granular/nucleolar patterns | Report a labeling index within a predeclared cell population/ROI; there is no universal lung high/low cutoff |
+
+The canonical symbol is `ITGA2`; the registry accepts the user-supplied
+`IGTA2` spelling only as an alias. The explicit pilot morphology defaults are
+documented in [`MARKER_MORPHOLOGY_GUIDE.md`](MARKER_MORPHOLOGY_GUIDE.md).
 
 ## 4. Research-context profiles
 

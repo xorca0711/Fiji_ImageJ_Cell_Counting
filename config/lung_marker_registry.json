@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.2.0",
   "title": "Universal lung IF marker registry",
   "scope": "Research-oriented marker metadata for lung lineage, repair, fibrosis, vascular, immune, and tumor-lineage imaging. It is not a diagnostic classifier.",
   "source_note": "Structured from the user-supplied Lung_Cell_Lineages_Markers_Reference.pdf (7 pages) and the primary sources listed in docs/UNIVERSAL_MARKER_CONFIGURATION.md.",
@@ -110,6 +110,16 @@
       "lineages_or_states": ["airway basal"],
       "modalities": ["IF", "FACS"]
     },
+    "ITGA2": {
+      "aliases": ["IGTA2", "CD49b", "integrin alpha-2", "integrin alpha 2", "Itga2"],
+      "default_role": "membrane",
+      "default_measurement": "cell_surface_and_membrane_support",
+      "localization": "plasma membrane with assay-dependent cytoplasmic staining",
+      "lineages_or_states": ["collagen-adherent epithelial or tumor cells", "multiple stromal and immune populations"],
+      "candidate_compartments": ["airway", "alveolar", "tumor", "stromal", "immune"],
+      "research_contexts": ["acute_injury_regeneration", "lung_adenocarcinoma_lineage"],
+      "interpretation_caveat": "ITGA2/CD49b is not lineage-specific and can mark non-epithelial cells. Require the intended anatomical ROI and epithelial, tumor, stromal, or immune co-markers; IGTA2 is retained only as a typo-tolerant alias."
+    },
     "KRT4": {
       "aliases": ["CK4", "Krt4"],
       "default_role": "cyto",
@@ -131,7 +141,8 @@
       "localization": "cytoplasmic intermediate filament",
       "lineages_or_states": ["broad simple epithelium", "DATP/ADI/PATS transitional when high with co-markers"],
       "candidate_compartments": ["airway", "alveolar", "fibrotic", "tumor"],
-      "interpretation_caveat": "KRT8 alone is not a transitional-state identifier."
+      "research_contexts": ["acute_injury_regeneration", "ipf_fibrosis", "lung_adenocarcinoma_lineage"],
+      "interpretation_caveat": "KRT8 positivity alone is not a transitional-state identifier. A KRT8-high repair-state endpoint needs a predeclared abundance cutoff, alveolar or fibrotic geography, and co-markers such as CLDN4 with AT2/AT1 lineage context."
     },
     "FOXJ1": {
       "aliases": ["Foxj1"],
@@ -413,7 +424,10 @@
       "default_role": "nuc_marker",
       "default_measurement": "nuclear_transcription_factor",
       "localization": "nuclear",
-      "lineages_or_states": ["developmental distal tip", "aberrant basaloid/developmental reactivation"]
+      "lineages_or_states": ["developmental distal tip", "airway glandular progenitor", "injury-associated epithelial progenitor", "aberrant basaloid/developmental reactivation", "subset of lung tumors"],
+      "candidate_compartments": ["airway", "alveolar", "fibrotic", "tumor"],
+      "research_contexts": ["acute_injury_regeneration", "ipf_fibrosis", "lung_adenocarcinoma_lineage"],
+      "interpretation_caveat": "Count only connected DAPI-nuclear enrichment as SOX9-positive. Cytoplasmic staining alone is not a transcription-factor-positive call, and SOX9 does not establish lineage or malignancy without geography and co-markers."
     },
     "PDGFRA": {
       "aliases": ["CD140a", "Pdgfra"],
@@ -423,11 +437,14 @@
       "lineages_or_states": ["alveolar fibroblast", "repair-supportive mesenchyme"]
     },
     "PDGFRB": {
-      "aliases": ["CD140b", "Pdgfrb"],
+      "aliases": ["PDGFR-beta", "PDGFR beta", "PDGFRβ", "CD140b", "Pdgfrb"],
       "default_role": "membrane",
-      "default_measurement": "cell_surface_membrane_support",
-      "localization": "cell surface",
-      "lineages_or_states": ["pericyte/myofibroblast", "dysplastic injury-responsive mesenchyme"]
+      "default_measurement": "perivascular_stromal_membrane_support",
+      "localization": "cell-surface receptor on elongated or branching stromal/perivascular cells",
+      "lineages_or_states": ["pericyte-like cell", "activated perivascular or myofibroblast-like mesenchyme", "dysplastic injury-responsive mesenchyme"],
+      "candidate_compartments": ["stromal", "vascular", "fibrotic", "tumor"],
+      "research_contexts": ["acute_injury_regeneration", "ipf_fibrosis", "lung_adenocarcinoma_lineage"],
+      "interpretation_caveat": "PDGFRB is not sufficient to identify a pericyte or myofibroblast. At 20x, regional positive area and spatial association with vessels are safer than per-nucleus calls; combine with vascular exclusion and stromal/pericyte markers."
     },
     "ACTA2": {
       "aliases": ["alpha-SMA", "aSMA", "SMA", "Acta2"],
@@ -554,6 +571,37 @@
       "localization": "cytoplasmic intermediate filament",
       "lineages_or_states": ["broad glandular epithelium", "many lung adenocarcinomas"],
       "interpretation_caveat": "Sensitive but not specific for pulmonary origin."
+    },
+    "KRAS": {
+      "aliases": ["Kras", "pan-KRAS", "KRAS protein"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_cytoplasmic_and_membrane_associated_support",
+      "localization": "inner plasma membrane and cytoplasmic/punctate protein signal",
+      "lineages_or_states": ["broad KRAS protein expression", "subset of molecularly altered tumors when mutation is established independently"],
+      "candidate_compartments": ["airway", "alveolar", "tumor"],
+      "research_contexts": ["acute_injury_regeneration", "lung_adenocarcinoma_lineage"],
+      "interpretation_caveat": "Pan-KRAS protein staining does not establish KRAS mutation, allele, pathway activation, tumor identity, or malignancy. Any mutant-specific antibody endpoint must name the allele and be analytically validated against molecular genotyping."
+    },
+    "RED2_KRAS_G12D_RFP": {
+      "aliases": ["Red2-Kras", "Red2Kras", "Red2-KrasG12D", "Red2KrasG12D", "R2KR", "Red2Onco-KrasG12D"],
+      "default_role": "cyto",
+      "default_measurement": "perinuclear_mutant_clone_rfp_reporter",
+      "localization": "tdimer2 RFP reporter filling recombined KrasG12D clone cytoplasm",
+      "lineages_or_states": ["Cre-recombined RFP-positive clone co-expressing ectopic KrasG12D in the Red2Onco system"],
+      "candidate_compartments": ["airway", "alveolar", "tumor"],
+      "research_contexts": ["acute_injury_regeneration", "lung_adenocarcinoma_lineage"],
+      "recommended_regional_endpoint": "RFP-positive clone area divided by blinded tissue or lobe ROI area",
+      "interpretation_caveat": "RFP-positive identifies the Red2Onco KrasG12D-coupled clone; it is not direct KRAS immunostaining. RFP-negative is not automatically wild type because it can include unrecombined or unlabelled cells. In multicolour-labelled cells, the non-red Confetti reporters represent separately labelled wild-type clones according to the model design."
+    },
+    "MKI67": {
+      "aliases": ["Ki67", "Ki-67", "KI67", "Mki67"],
+      "default_role": "nuc_marker",
+      "default_measurement": "nuclear_proliferation_labeling_index",
+      "localization": "nuclear and cell-cycle-dependent nucleolar/chromatin-associated pattern",
+      "lineages_or_states": ["actively cycling cells outside G0"],
+      "candidate_compartments": ["airway", "alveolar", "tumor", "fibrotic", "stromal", "vascular", "immune"],
+      "research_contexts": ["acute_injury_regeneration", "ipf_fibrosis", "lung_adenocarcinoma_lineage"],
+      "interpretation_caveat": "Report the Ki-67-positive fraction within a predeclared cell population or ROI. Ki-67 is not lineage-specific, does not identify malignancy, and has no universal lung-tissue high/low cutoff."
     }
   }
 }

@@ -48,6 +48,20 @@ interpretation are separate. A marker registry entry may supply a geometry
 default, but it never assigns a disease diagnosis or a final cell identity.
 Unknown markers remain supported when the custom panel declares their role.
 
+For the newly expanded profiles: KRT8 uses connected cytoplasmic filament
+support; ITGA2/CD49b uses connected membrane support; SOX9 requires connected
+DAPI-nuclear enrichment; and PDGFRB is preferably a regional/perivascular area
+endpoint at 20x, with per-nucleus membrane calls reserved for validated
+high-resolution ownership. Red2-Kras uses connected cytoplasmic RFP reporter
+support with clone area primary at 20x; RFP-positive marks the verified
+oncogene-coupled clone, whereas RFP-negative alone is not a wild-type call.
+Pan-KRAS uses connected cytoplasmic/inner-membrane protein support but does not
+imply a KRAS mutation. Ki-67/MKI67 uses connected nuclear enrichment and is
+summarized as a labeling index inside a predeclared population or ROI. `IGTA2`
+is accepted as an alias of canonical `ITGA2`. Except for the construct-linked
+Red2-Kras RFP interpretation, none of these markers assigns a lineage,
+mutation, malignancy, or disease state by itself.
+
 ## End-to-end workflow
 
 ```mermaid
@@ -65,7 +79,7 @@ flowchart TD
     J -- Yes --> K{Localization or enrichment passes?}
     K -- No --> I
     K -- Yes --> L{Required anatomical compartment passes?}
-    L -- No --> I
+    L -- No --> F
     L -- Yes --> M[Positive]
     F --> N[Export cell CSV, masks, call QC, and provenance]
     I --> N

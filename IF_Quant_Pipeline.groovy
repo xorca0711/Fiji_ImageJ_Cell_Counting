@@ -173,7 +173,8 @@ def FIXED_POS_THRESHOLDS = [:]
 // exploratory. Examples: IFQ_CC10_THRESHOLD, IFQ_TDTOM_THRESHOLD.
 def thresholdMarkers = ["KRT5", "AGER", "PDPN", "ProSPC", "CD8", "CD4",
                         "Sox2", "Aqp5", "p63", "YAP", "CC10", "tdTOM",
-                        "AcTub", "T1A", "mRAGE"]
+                        "AcTub", "T1A", "mRAGE", "KRT8", "ITGA2",
+                        "PDGFRB", "SOX9", "KRAS", "RED2_KRAS_G12D_RFP", "MKI67"]
 thresholdMarkers.each { marker ->
   String token = marker.toUpperCase().replaceAll(/[^A-Z0-9]+/, "")
   def rawValue = System.getenv("IFQ_" + token + "_THRESHOLD")
@@ -213,12 +214,19 @@ def ROLE_MORPHOLOGY_DEFAULTS = [
 ]
 def MORPHOLOGY_RULES = [
   "KRT5" : [minFraction:0.20d, minLargestShare:0.50d, requireOwnership:true],
+  "KRT8" : [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
+  "ITGA2":[minFraction:0.25d, minLargestShare:0.40d, requireOwnership:true],
+  "PDGFRB":[minFraction:0.25d, minLargestShare:0.40d, requireOwnership:true],
+  "KRAS" : [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
+  "RED2_KRAS_G12D_RFP":[minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
   "AGER" : [minFraction:0.25d, minLargestShare:0.40d, requireOwnership:true],
   "PDPN" : [minFraction:0.25d, minLargestShare:0.40d, requireOwnership:true],
   "ProSPC":[minFraction:0.15d, minLargestShare:0.40d, requireOwnership:true],
   "CD8"  : [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
   "CD4"  : [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
   "Sox2" : [minFraction:0.40d, minLargestShare:0.60d, requireOwnership:false, minNuclearEnrichment:1.25d],
+  "SOX9" : [minFraction:0.40d, minLargestShare:0.60d, requireOwnership:false, minNuclearEnrichment:1.25d],
+  "MKI67": [minFraction:0.10d, minLargestShare:0.30d, requireOwnership:false, minNuclearEnrichment:1.25d],
   "Aqp5" : [minFraction:0.20d, minLargestShare:0.40d, requireOwnership:true],
   "p63"  : [minFraction:0.40d, minLargestShare:0.60d, requireOwnership:false, minNuclearEnrichment:1.25d],
   "YAP"  : [minFraction:0.30d, minLargestShare:0.60d, requireOwnership:false, minNucCytoRatio:1.50d],
@@ -276,7 +284,9 @@ def POD_THRESH_METHOD   = "Otsu" // Otsu|Triangle|Li|Huang|MaxEntropy...
 def POS_SENSITIVITY = [ "KRT5":1.00, "AGER":1.00, "PDPN":1.00, "ProSPC":1.00,
                         "CD8":1.00, "CD4":1.00, "Sox2":1.00, "Aqp5":1.00,
                         "p63":1.00, "YAP":1.00, "CC10":1.00, "tdTOM":1.00,
-                        "AcTub":1.00, "T1A":1.00, "mRAGE":1.00 ]
+                        "AcTub":1.00, "T1A":1.00, "mRAGE":1.00,
+                        "KRT8":1.00, "ITGA2":1.00, "PDGFRB":1.00, "SOX9":1.00,
+                        "KRAS":1.00, "RED2_KRAS_G12D_RFP":1.00, "MKI67":1.00 ]
 
 // --- Tissue auto-detection (used only if no manual ROI is supplied) ---
 def TISSUE_BLUR_SIGMA_PX = 4.0
@@ -599,10 +609,20 @@ allAnalysisChannels.each { c ->
   def rawThreshold = System.getenv("IFQ_" + token + "_THRESHOLD")
   if (rawThreshold != null && !rawThreshold.trim().isEmpty()) {
     FIXED_POS_THRESHOLDS[marker] = parseDoubleSetting("IFQ_" + token + "_THRESHOLD", rawThreshold.trim())
+  } else if (c.registryKey != null && FIXED_POS_THRESHOLDS.containsKey(c.registryKey.toString())) {
+    // A canonical threshold (for example IFQ_MKI67_THRESHOLD) also applies
+    // when the panel uses a registry alias such as Ki-67. An alias-specific
+    // environment value above remains the highest-precedence override.
+    FIXED_POS_THRESHOLDS[marker] = FIXED_POS_THRESHOLDS[c.registryKey.toString()]
   }
   if (!POS_SENSITIVITY.containsKey(marker)) POS_SENSITIVITY[marker] = 1.0d
   if (c.cellCall != false && !MORPHOLOGY_RULES.containsKey(marker)) {
-    def roleRule = ROLE_MORPHOLOGY_DEFAULTS[c.role]
+    // Registry aliases inherit the canonical marker's validated geometry rule
+    // before falling back to the broader role template. This keeps Ki-67,
+    // Kras, IGTA2, PDGFR-beta, and other aliases behaviorally equivalent to
+    // their canonical registry keys rather than merely descriptively matched.
+    def canonicalRule = c.registryKey != null ? MORPHOLOGY_RULES[c.registryKey.toString()] : null
+    def roleRule = canonicalRule ?: ROLE_MORPHOLOGY_DEFAULTS[c.role]
     if (roleRule == null) {
       failRun("No cell-call morphology defaults for role '" + c.role + "'")
     }
