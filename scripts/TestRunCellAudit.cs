@@ -70,6 +70,27 @@ public static class TestRunCellAudit
         return denominator == 0 ? "" : (100.0 * numerator / denominator).ToString("R", CultureInfo.InvariantCulture);
     }
 
+    private static string[] ParseCsvLine(string line)
+    {
+        var values = new List<string>();
+        var field = new StringBuilder();
+        bool quoted = false;
+        for (int i = 0; i < line.Length; i++)
+        {
+            char ch = line[i];
+            if (ch == '"')
+            {
+                if (quoted && i + 1 < line.Length && line[i + 1] == '"') { field.Append('"'); i++; }
+                else quoted = !quoted;
+            }
+            else if (ch == ',' && !quoted) { values.Add(field.ToString()); field.Clear(); }
+            else field.Append(ch);
+        }
+        if (quoted) throw new InvalidDataException("Unclosed quoted CSV field");
+        values.Add(field.ToString());
+        return values.ToArray();
+    }
+
     private static void Update(Metric m, string raw, string finalCall, string status, string reason,
                                string[] values, Dictionary<string, int> gateIndexes)
     {
@@ -117,7 +138,7 @@ public static class TestRunCellAudit
             {
                 string headerLine = reader.ReadLine();
                 if (headerLine == null) continue;
-                string[] headers = headerLine.Split(new[] { ',' }, StringSplitOptions.None);
+                string[] headers = ParseCsvLine(headerLine);
                 var index = headers.Select((name, i) => new { name, i }).ToDictionary(x => x.name, x => x.i);
                 int panelIndex = index["panel"];
                 var markerInfo = new Dictionary<string, Tuple<int, int, int, int, Dictionary<string, int>>>();
@@ -139,7 +160,7 @@ public static class TestRunCellAudit
                 while ((line = reader.ReadLine()) != null)
                 {
                     if (line.Length == 0) continue;
-                    string[] values = line.Split(new[] { ',' }, StringSplitOptions.None);
+                    string[] values = ParseCsvLine(line);
                     string panel = values[panelIndex];
                     foreach (var markerPair in markerInfo)
                     {
